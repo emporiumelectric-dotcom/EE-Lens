@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Only the single folder the camera writes a pending capture into is shared, and
+  only with the camera app for the moment the shot is taken. Nothing else in the
+  app's storage is reachable through this provider.
+-->
+<paths>
+    <cache-path name="captures" path="captures/" />
+</paths>

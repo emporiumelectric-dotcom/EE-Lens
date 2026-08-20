@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EE Lens Catalogue Manager</title>
+<link rel="stylesheet" href="styles.css?v=1786867904" />
+</head>
+<body>
+
+<header class="mast">
+  <div class="brand">
+    <span class="brand-mark">Electric</span><span class="brand-rest">Emporium</span>
+    <span class="brand-sub">Catalogue Manager</span>
+  </div>
+  <div class="mast-actions">
+    <span id="stats" class="stats">—</span>
+    <button id="import-btn" class="btn ghost" type="button">Import .eelens</button>
+    <button id="export-btn" class="btn solid" type="button">Export .eelens</button>
+    <button id="sync-btn" class="btn ghost" type="button" hidden>Phone sync</button>
+    <input id="import-file" type="file" accept=".eelens,.zip" hidden />
+  </div>
+</header>
+
+<main class="layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      <input id="search" class="search" type="search" placeholder="Search all products…" autocomplete="off" />
+      <select id="category-filter" class="search" aria-label="Filter by category">
+        <option value="">All categories</option>
+      </select>
+      <button id="new-btn" class="btn solid full" type="button">New product</button>
+      <button id="url-btn" class="btn ghost full" type="button">Import from product URL</button>
+    </div>
+    <ul id="product-list" class="product-list"></ul>
+    <p id="list-empty" class="list-empty">No products yet. Create one, or import a catalogue.</p>
+  </aside>
+
+  <section id="editor" class="editor" hidden>
+    <div class="editor-head">
+      <h2 id="editor-title">New product</h2>
+      <div class="editor-head-actions">
+        <button id="delete-btn" class="btn danger" type="button">Delete</button>
+        <button id="save-btn" class="btn solid" type="button">Save product</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <label class="field"><span>Brand <b class="req">*</b></span><input id="f-brand" type="text" /></label>
+      <label class="field"><span>Product name <b class="req">*</b></span><input id="f-name" type="text" /></label>
+      <label class="field"><span>Model</span><input id="f-model" type="text" /></label>
+      <label class="field">
+        <span>Category</span>
+        <select id="f-category-select"></select>
+        <input id="f-category" type="text" placeholder="Type the category" hidden />
+      </label>
+      <label class="field"><span>Colour</span><input id="f-colour" type="text" /></label>
+      <label class="field"><span>Wattage (W)</span><input id="f-wattage" type="text" placeholder="800" /></label>
+      <label class="field"><span>Size (mm) <em class="opt">optional</em></span><input id="f-sweep" type="number" min="0" step="1" list="size-options" placeholder="e.g. fan sweep, tube length" /><datalist id="size-options"></datalist></label>
+      <label class="field"><span>MRP (₹)</span><input id="f-mrp" type="text" inputmode="decimal" placeholder="30000" /></label>
+      <label class="field"><span>Selling price (₹)</span><input id="f-price" type="text" inputmode="decimal" placeholder="19498" /></label>
+      <label class="field"><span>Discount <em class="opt">calculated</em></span><input id="f-discount" type="text" readonly /></label>
+    </div>
+
+    <label class="field wide"><span>Description</span><textarea id="f-description" rows="3"></textarea></label>
+
+    <div class="specs">
+      <div class="specs-head">
+        <h3>Specifications</h3>
+        <div class="specs-actions">
+          <button id="suggest-specs" class="btn ghost small" type="button" hidden></button>
+          <button id="add-spec" class="btn ghost small" type="button">Add specification</button>
+        </div>
+      </div>
+      <p class="photos-note">
+        Anything worth recording, named however you like — wattage, lumens, amperage,
+        core count, capacity, warranty. Different categories need different fields.
+      </p>
+      <div id="spec-rows"></div>
+    </div>
+
+    <section class="photos" data-role="recognition">
+      <div class="photos-head">
+        <h3>Shop photos <em>· used for recognition</em></h3>
+        <span class="hint" id="shop-count"></span>
+      </div>
+      <p class="photos-note">
+        Photos of the actual product on your shelf. These are what the phone camera matches
+        against. Aim for 6–10 from a few angles. They are never shown to customers.
+      </p>
+      <div class="dropzone" data-role="recognition">
+        <div class="dz-inner">
+          <strong>Drag photos here</strong>
+          <span>or</span>
+          <button class="btn ghost small pick" type="button" data-role="recognition">Choose files</button>
+          <div class="url-row">
+            <input class="url-input" type="url" placeholder="…or paste an image link" data-role="recognition" />
+            <button class="btn ghost small url-add" type="button" data-role="recognition">Add link</button>
+          </div>
+        </div>
+      </div>
+      <div class="tiles" id="tiles-recognition"></div>
+    </section>
+
+    <section class="photos" data-role="display">
+      <div class="photos-head">
+        <h3>Catalogue photos <em>· shown in the app</em></h3>
+        <span class="hint" id="catalogue-count"></span>
+      </div>
+      <p class="photos-note">
+        Clean images from a catalogue or the manufacturer. These are what customers see, and
+        they let the phone recognise the product from a laptop or phone screen.
+      </p>
+      <div class="dropzone" data-role="display">
+        <div class="dz-inner">
+          <strong>Drag photos here</strong>
+          <span>or</span>
+          <button class="btn ghost small pick" type="button" data-role="display">Choose files</button>
+          <div class="url-row">
+            <input class="url-input" type="url" placeholder="…or paste an image link" data-role="display" />
+            <button class="btn ghost small url-add" type="button" data-role="display">Add link</button>
+          </div>
+        </div>
+      </div>
+      <div class="tiles" id="tiles-display"></div>
+    </section>
+
+    <p class="tile-help">
+      Drag a photo to reorder it. Click <b>Cover</b> to make it the main image, or <b>Move</b> to
+      send it to the other section. Every photo is copied into this catalogue, so deleting the
+      original file will not break it.
+    </p>
+  </section>
+
+  <section id="placeholder" class="placeholder">
+    <h2>Electric Emporium catalogue</h2>
+    <p>Select a product on the left, create a new one, or import an existing <code>.eelens</code> file.</p>
+    <p class="placeholder-note">Everything stays on this PC. Nothing is uploaded anywhere.</p>
+    <p class="placeholder-note">
+      Tip: drag a <code>.eelens</code> file anywhere onto this page to load it — straight from
+      the phone's Downloads folder if it is plugged in.
+    </p>
+  </section>
+
+</main>
+
+<div id="url-modal" class="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="url-modal-title">
+    <div class="modal-head">
+      <h2 id="url-modal-title">Import from product URL</h2>
+      <button id="url-close" class="btn ghost small" type="button">Close</button>
+    </div>
+
+    <div class="modal-body">
+      <div class="url-fetch">
+        <textarea id="url-source" rows="3"
+                  placeholder="https://…  paste one product link per line"></textarea>
+        <button id="url-go" class="btn solid" type="button">Fetch details</button>
+      </div>
+      <p class="modal-note">
+        Paste as many links as you like, one per line — press Enter for a new line, then click
+        <b>Fetch details</b>. Each one is shown to you in turn. Nothing is saved until you
+        press Approve on that product.
+      </p>
+      <p id="url-error" class="modal-error" hidden></p>
+
+      <div id="url-preview" hidden>
+        <div id="url-queue-bar" class="queue-bar" hidden></div>
+        <div class="preview-flag" id="url-source-note"></div>
+
+        <div id="u-variant-row" class="variant-row" hidden>
+          <label class="field">
+            <span>Which one are you adding? <b class="req">*</b></span>
+            <select id="u-variant"></select>
+          </label>
+          <p class="modal-note">
+            This page sells several versions. Only the one you pick is imported — its own
+            code, colour, size, prices and photos.
+          </p>
+        </div>
+
+        <div class="grid">
+          <label class="field"><span>Brand <b class="req">*</b></span><input id="u-brand" type="text" /></label>
+          <label class="field"><span>Product name <b class="req">*</b></span><input id="u-name" type="text" /></label>
+          <label class="field"><span>Model</span><input id="u-model" type="text" /></label>
+          <label class="field">
+            <span>Category</span>
+            <select id="u-category-select"></select>
+            <input id="u-category" type="text" placeholder="Type the category" hidden />
+          </label>
+          <label class="field"><span>Colour</span><input id="u-colour" type="text" /></label>
+          <label class="field"><span>Wattage (W)</span><input id="u-wattage" type="text" placeholder="800" /></label>
+          <label class="field"><span>Size (mm) <em class="opt">optional</em></span><input id="u-sweep" type="number" min="0" step="1" list="size-options" /></label>
+          <label class="field"><span>MRP (₹)</span><input id="u-mrp" type="text" inputmode="decimal" /></label>
+          <label class="field"><span>Selling price (₹)</span><input id="u-price" type="text" inputmode="decimal" /></label>
+          <label class="field"><span>Discount (%)</span><input id="u-discount" type="text" inputmode="decimal" /></label>
+        </div>
+        <p class="modal-note">
+          All three are editable. Change the MRP or the selling price and the discount
+          recalculates; type a discount and the selling price follows.
+        </p>
+
+        <label class="field wide"><span>Description</span><textarea id="u-description" rows="3"></textarea></label>
+
+        <h3 class="preview-h">Specifications found</h3>
+        <div id="u-specs"></div>
+
+        <h3 class="preview-h">Images found <span id="u-image-count" class="hint"></span></h3>
+        <p class="modal-note">
+          Tick the ones to keep. Images from a website are usually catalogue photos;
+          switch any that are really shelf photos.
+        </p>
+        <div id="u-images" class="tiles"></div>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <span id="url-summary" class="hint"></span>
+      <div class="modal-foot-actions">
+        <button id="url-manual" class="btn ghost" type="button">Enter manually instead</button>
+        <button id="url-skip" class="btn ghost" type="button" hidden>Skip this one</button>
+        <button id="url-approve" class="btn solid" type="button" disabled>Approve and save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="sync-modal" class="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="sync-title">
+    <div class="modal-head">
+      <h2 id="sync-title">Phone sync</h2>
+      <button id="sync-close" class="btn ghost small" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-note">
+        Your phone and this PC talk directly over the shop's Wi-Fi. Nothing goes to the
+        internet, and only a phone holding the code below can connect.
+      </p>
+
+      <div class="pairing">
+        <div><span>On the phone, enter this address</span><strong id="sync-address">—</strong></div>
+        <div><span>and this pairing code</span><strong id="sync-code" class="code">—</strong></div>
+      </div>
+
+      <h3 class="preview-h">Send your work to the phone</h3>
+      <p class="modal-note">
+        Puts the catalogue on this PC where the phone can collect it. On the phone, open
+        <b>Backup</b> and press <b>Get from PC</b>.
+      </p>
+      <button id="sync-push" class="btn solid" type="button">Share this catalogue with the phone</button>
+      <p class="hint" id="sync-push-at"></p>
+
+      <h3 class="preview-h">Take the phone's work</h3>
+      <p class="modal-note">
+        After you press <b>Send to PC</b> on the phone, collect it here.
+      </p>
+      <button id="sync-pull" class="btn ghost" type="button">Load what the phone shared</button>
+      <p class="hint" id="sync-pull-at"></p>
+    </div>
+  </div>
+</div>
+
+<input id="file-input" type="file" accept="image/*" multiple hidden />
+<div id="toast" class="toast" hidden></div>
+<div id="busy" class="busy" hidden><div class="busy-box"><span class="spinner"></span><span id="busy-text">Working…</span></div></div>
+
+<!-- Classic scripts, in dependency order, so the page also works when the
+     index.html file is opened straight from disk. -->
+<script src="zip.js?v=1786867904"></script>
+<script src="storage.js?v=1786867904"></script>
+<script src="images.js?v=1786867904"></script>
+<script src="eelens.js?v=1786867904"></script>
+<script src="import-url.js?v=1786867904"></script>
+<script src="app.js?v=1786867904"></script>
+</body>
+</html>

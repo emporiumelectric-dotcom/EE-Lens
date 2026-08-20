@@ -1,0 +1,30 @@
+# --- Android/Gradle build output (already present) ---
+.gradle/
+.idea/
+local.properties
+**/build/
+*.iml
+.kotlin/
+
+# --- Built APKs: binary output, not source. 766 MB across 11 builds.
+# Regenerate from source with ./gradlew, or distribute via GitHub Releases
+# (designed for exactly this) instead of committing them to history. ---
+APKs/
+*.apk
+
+# --- Real synced catalogue data: actual product photos and stock data
+# from a live phone<->PC sync session, not sample/fixture data. ---
+pc-catalogue-manager/sync/
+*.eelens
+
+# --- AI tool session caches: not project source. ---
+.codex-remote-attachments/
+.hallmark/
+
+# --- OS cruft, just in case ---
+Thumbs.db
+.DS_Store
+
+# Note: app/src/main/assets/catalog/ (bundled demo-product photos, 2.4 MB)
+# is deliberately NOT ignored -- the app's recognition demo needs them, and
+# they're product photography, not sensitive data. Kept in the repo.
