@@ -507,7 +507,17 @@ function imageFilesFrom(dataTransfer) {
 
 /* ---------- save / delete ---------- */
 
+/** Gates any action that changes the catalogue. Refreshes the session first. */
+async function requireSignedIn(action) {
+  await ensureFreshSession();
+  if (isSignedIn()) return true;
+  toast(`Sign in to ${action}.`, true);
+  openAuthModal();
+  return false;
+}
+
 async function saveProduct() {
+  if (!(await requireSignedIn('save changes'))) return;
   collectForm();
   const p = current.product;
   if (!p.brand || !p.name) {
@@ -551,6 +561,7 @@ function flashInList(productId) {
 }
 
 async function removeCurrentProduct() {
+  if (!(await requireSignedIn('delete products'))) return;
   const p = current.product;
   if (!confirm(`Delete "${p.brand} ${p.name}" and its photos from this PC?\n\nThis cannot be undone here.`)) return;
   await deleteProduct(p.id);
@@ -1078,6 +1089,7 @@ function updateCandidateSummary() {
 
 /** Nothing reaches the catalogue until this runs. */
 async function approveCandidate() {
+  if (!(await requireSignedIn('save imported products'))) return;
   const brand = $('u-brand').value.trim();
   const name = $('u-name').value.trim();
   if (!brand || !name) {
@@ -1165,6 +1177,57 @@ async function approveCandidate() {
     (failed ? ` · ${failed} images could not be downloaded` : ''),
     failed > 0
   );
+}
+
+/* ---------- sign in ---------- */
+
+function updateAuthUI() {
+  const btn = $('auth-btn');
+  btn.textContent = isSignedIn() ? `Sign out (${session.email})` : 'Sign in';
+}
+
+function openAuthModal() {
+  $('auth-error').hidden = true;
+  $('auth-status').textContent = '';
+  $('auth-email').value = session?.email || '';
+  $('auth-password').value = '';
+  $('auth-modal').hidden = false;
+  $('auth-email').focus();
+}
+
+function closeAuthModal() {
+  $('auth-modal').hidden = true;
+}
+
+async function trySignIn() {
+  const email = $('auth-email').value.trim();
+  const password = $('auth-password').value;
+  if (!email || !password) {
+    $('auth-error').textContent = 'Enter both an email and a password.';
+    $('auth-error').hidden = false;
+    return;
+  }
+  busy(true, 'Signing in…');
+  try {
+    await signIn(email, password);
+    busy(false);
+    closeAuthModal();
+    toast(`Signed in as ${email}`);
+  } catch (error) {
+    busy(false);
+    $('auth-error').textContent = error.message;
+    $('auth-error').hidden = false;
+  }
+}
+
+async function toggleAuth() {
+  if (isSignedIn()) {
+    if (!confirm('Sign out? You can still browse the catalogue, but adding, editing or deleting will need signing in again.')) return;
+    await signOut();
+    toast('Signed out');
+  } else {
+    openAuthModal();
+  }
 }
 
 /* ---------- phone sync over the shop network ---------- */
@@ -1334,6 +1397,13 @@ function wire() {
   $('u-category').addEventListener('input', () => refreshSizeOptions($('u-category').value));
   $('u-category').addEventListener('change', addTemplateRows);
   $('url-skip').addEventListener('click', skipQueueItem);
+  $('auth-btn').addEventListener('click', toggleAuth);
+  $('auth-close').addEventListener('click', closeAuthModal);
+  $('auth-go').addEventListener('click', trySignIn);
+  $('auth-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') trySignIn(); });
+  $('auth-modal').addEventListener('click', (e) => { if (e.target === $('auth-modal')) closeAuthModal(); });
+  onAuthChange(updateAuthUI);
+
   $('sync-btn').addEventListener('click', openSync);
   $('sync-close').addEventListener('click', () => { $('sync-modal').hidden = true; });
   $('sync-push').addEventListener('click', pushToPhone);
@@ -1455,6 +1525,9 @@ function wire() {
 (async function start() {
   installFailSafes();
   wire();
+  updateAuthUI();
+  await ensureFreshSession();
+  updateAuthUI();
   const swept = await sweepOrphans();
   await refreshSyncAvailability();
   await renderList();

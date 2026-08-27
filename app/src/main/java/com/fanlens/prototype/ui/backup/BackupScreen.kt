@@ -22,6 +22,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -191,6 +192,90 @@ fun BackupScreen(viewModel: BackupViewModel) {
                 Spacer(Modifier.width(12.dp))
                 Text(state.busyMessage, color = FanLensColors.InkMuted)
             }
+        }
+
+        Spacer(Modifier.height(28.dp))
+        HorizontalDivider(color = FanLensColors.Rule)
+        Spacer(Modifier.height(20.dp))
+
+        Text(
+            "App updates",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = FanLensColors.Ink
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "You have version ${state.currentVersion}.",
+            style = MaterialTheme.typography.bodySmall,
+            color = FanLensColors.InkMuted
+        )
+        Spacer(Modifier.height(12.dp))
+
+        val updateAvailable = state.updateAvailable
+        when {
+            state.readyApk != null -> Button(
+                onClick = viewModel::installUpdate,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = FanLensColors.BrandRed,
+                    contentColor = FanLensColors.Paper
+                )
+            ) { Text("Install now", fontWeight = FontWeight.Bold) }
+
+            state.downloadingUpdate -> Column {
+                LinearProgressIndicator(
+                    progress = { state.downloadProgress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = FanLensColors.BrandRed
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Downloading version ${updateAvailable?.versionName}…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = FanLensColors.InkMuted
+                )
+            }
+
+            updateAvailable != null -> Column {
+                Text(
+                    "Version ${updateAvailable.versionName} is available.",
+                    fontWeight = FontWeight.Bold,
+                    color = FanLensColors.Ink
+                )
+                if (updateAvailable.notes.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        updateAvailable.notes,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = FanLensColors.InkMuted
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = viewModel::downloadUpdate,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = FanLensColors.BrandRed,
+                        contentColor = FanLensColors.Paper
+                    )
+                ) { Text("Download update", fontWeight = FontWeight.Bold) }
+            }
+
+            else -> OutlinedButton(
+                onClick = viewModel::checkForUpdate,
+                enabled = !state.checkingUpdate,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(if (state.checkingUpdate) "Checking…" else "Check for update") }
+        }
+
+        state.updateMessage?.let { message ->
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (state.updateMessageIsProblem) MaterialTheme.colorScheme.error else FanLensColors.InkMuted
+            )
         }
 
         state.message?.let { message ->

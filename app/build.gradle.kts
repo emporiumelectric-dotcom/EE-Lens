@@ -1,7 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+}
+
+// A release built on one PC must install as an *update* to a release built on
+// another, or the phone rejects it and demands an uninstall first. That only
+// works if every PC signs with the same key -- so this is deliberately one
+// shared file (keystore.properties + keystore/), copied between machines out
+// of band, never generated fresh per machine the way debug keys are.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val hasReleaseSigning = keystorePropertiesFile.exists()
+val keystoreProperties = Properties().apply {
+    if (hasReleaseSigning) load(keystorePropertiesFile.inputStream())
 }
 
 android {
@@ -16,6 +29,30 @@ android {
         versionName = "0.10.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // Without keystore.properties present (a PC it hasn't been copied
+            // to yet), this still compiles but is left unsigned -- Android
+            // refuses to install an unsigned APK, so a missing key fails
+            // loudly at install time rather than silently shipping a build
+            // nobody else's phone will accept as an update.
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     buildFeatures {

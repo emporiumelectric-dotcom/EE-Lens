@@ -18,6 +18,7 @@
     <button id="import-btn" class="btn ghost" type="button">Import .eelens</button>
     <button id="export-btn" class="btn solid" type="button">Export .eelens</button>
     <button id="sync-btn" class="btn ghost" type="button" hidden>Phone sync</button>
+    <button id="auth-btn" class="btn ghost" type="button">Sign in</button>
     <input id="import-file" type="file" accept=".eelens,.zip" hidden />
   </div>
 </header>
@@ -226,6 +227,30 @@
   </div>
 </div>
 
+<div id="auth-modal" class="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div class="modal-head">
+      <h2 id="auth-title">Sign in</h2>
+      <button id="auth-close" class="btn ghost small" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-note">
+        Sign in to add, edit, or delete products. Browsing and searching the catalogue
+        never needs this.
+      </p>
+      <label class="field wide"><span>Email</span><input id="auth-email" type="email" autocomplete="username" /></label>
+      <label class="field wide"><span>Password</span><input id="auth-password" type="password" autocomplete="current-password" /></label>
+      <p id="auth-error" class="modal-error" hidden></p>
+    </div>
+    <div class="modal-foot">
+      <span id="auth-status" class="hint"></span>
+      <div class="modal-foot-actions">
+        <button id="auth-go" class="btn solid" type="button">Sign in</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="sync-modal" class="modal" hidden>
   <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="sync-title">
     <div class="modal-head">
@@ -269,6 +294,7 @@
      index.html file is opened straight from disk. -->
 <script src="zip.js?v=1786867904"></script>
 <script src="storage.js?v=1786867904"></script>
+<script src="supabase.js?v=1786867904"></script>
 <script src="images.js?v=1786867904"></script>
 <script src="eelens.js?v=1786867904"></script>
 <script src="import-url.js?v=1786867904"></script>

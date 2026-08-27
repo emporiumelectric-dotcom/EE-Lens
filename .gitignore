@@ -21,6 +21,14 @@ pc-catalogue-manager/sync/
 .codex-remote-attachments/
 .hallmark/
 
+# --- Release signing key: a leaked or lost key is unrecoverable -- anyone
+# with it can sign a fake "update" to this app, and losing it means every
+# existing install can never be updated in place again. Never commit it.
+# Copy keystore.properties and keystore/ to a new PC yourself, out of band
+# (password manager, encrypted drive) -- never via git. ---
+keystore.properties
+keystore/
+
 # --- OS cruft, just in case ---
 Thumbs.db
 .DS_Store

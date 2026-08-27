@@ -1,6 +1,7 @@
 package com.fanlens.prototype.ui.backup
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -13,6 +14,9 @@ import com.fanlens.prototype.eelens.EelensSyncClient
 import com.fanlens.prototype.eelens.ImportConflictPolicy
 import com.fanlens.prototype.eelens.ImportPreview
 import com.fanlens.prototype.eelens.StagedPackage
+import com.fanlens.prototype.update.UpdateChecker
+import com.fanlens.prototype.update.UpdateInfo
+import com.fanlens.prototype.update.UpdateInstaller
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,7 +44,15 @@ class BackupViewModel(
         val pending: ImportPreview? = null,
         val lastExportLabel: String? = null,
         val syncAddress: String = "",
-        val syncCode: String = ""
+        val syncCode: String = "",
+        val currentVersion: String = "",
+        val checkingUpdate: Boolean = false,
+        val updateAvailable: UpdateInfo? = null,
+        val downloadingUpdate: Boolean = false,
+        val downloadProgress: Float = 0f,
+        val readyApk: File? = null,
+        val updateMessage: String? = null,
+        val updateMessageIsProblem: Boolean = false
     ) {
         val canSync: Boolean get() = syncAddress.isNotBlank() && syncCode.length >= 4
 
@@ -49,7 +61,7 @@ class BackupViewModel(
                 String.format(java.util.Locale.UK, "%.1f MB", storageBytes / (1024.0 * 1024.0))
     }
 
-    private val _state = MutableStateFlow(UiState())
+    private val _state = MutableStateFlow(UiState(currentVersion = appVersion))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var staged: StagedPackage? = null
@@ -266,6 +278,81 @@ class BackupViewModel(
     }
 
     fun consumeMessage() = _state.update { it.copy(message = null) }
+
+    /* ---------- app updates ---------- */
+
+    fun checkForUpdate() {
+        _state.update {
+            it.copy(checkingUpdate = true, updateAvailable = null, readyApk = null,
+                updateMessage = null, updateMessageIsProblem = false)
+        }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { UpdateChecker().latest() }
+            }.onSuccess { info ->
+                val newer = info != null && UpdateChecker.isNewer(info.versionName, appVersion)
+                _state.update {
+                    it.copy(
+                        checkingUpdate = false,
+                        updateAvailable = if (newer) info else null,
+                        updateMessage = when {
+                            info == null -> "No releases have been published yet."
+                            newer -> null
+                            else -> "You already have the latest version ($appVersion)."
+                        }
+                    )
+                }
+            }.onFailure { error ->
+                Log.e(TAG, "Update check failed", error)
+                _state.update {
+                    it.copy(checkingUpdate = false, updateMessageIsProblem = true,
+                        updateMessage = error.message ?: "Could not check for an update.")
+                }
+            }
+        }
+    }
+
+    fun downloadUpdate() {
+        val update = _state.value.updateAvailable ?: return
+        _state.update { it.copy(downloadingUpdate = true, downloadProgress = 0f, updateMessage = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    UpdateInstaller(context).download(update) { done, total ->
+                        if (total > 0) {
+                            val progress = done.toFloat() / total
+                            _state.update { it.copy(downloadProgress = progress) }
+                        }
+                    }
+                }
+            }.onSuccess { file ->
+                _state.update { it.copy(downloadingUpdate = false, readyApk = file) }
+            }.onFailure { error ->
+                Log.e(TAG, "Update download failed", error)
+                _state.update {
+                    it.copy(downloadingUpdate = false, updateMessageIsProblem = true,
+                        updateMessage = error.message ?: "The update could not be downloaded.")
+                }
+            }
+        }
+    }
+
+    /** Hands the downloaded APK to the system installer, asking for permission first if needed. */
+    fun installUpdate() {
+        val apk = _state.value.readyApk ?: return
+        val installer = UpdateInstaller(context)
+        if (!installer.canInstall()) {
+            context.startActivity(installer.requestInstallPermissionIntent().addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            _state.update {
+                it.copy(updateMessageIsProblem = true,
+                    updateMessage = "Allow EE Lens to install updates on the screen that just opened, then come back and press \"Install now\" again.")
+            }
+            return
+        }
+        context.startActivity(installer.installIntent(apk))
+    }
+
+    fun consumeUpdateMessage() = _state.update { it.copy(updateMessage = null) }
 
     companion object {
         private const val TAG = "EeBackup"

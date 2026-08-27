@@ -5,13 +5,24 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="true" />
 
     <!--
-      Needed only to reach the Catalogue Manager on the shop's own PC over the
-      local Wi-Fi. The app contacts nothing else: the address is typed by the
-      owner, checked to be a private one, and every request carries the pairing
-      code shown on the PC. MediaPipe's telemetry uploader shares this
-      permission but has nowhere to send anything the owner has not asked for.
+      Used for: reaching the Catalogue Manager on the shop's own PC over local
+      Wi-Fi (address typed by the owner, checked to be a private one, every
+      request carries the pairing code shown on the PC); and checking GitHub's
+      public releases page for a newer version when the owner presses "Check
+      for update". Nothing happens on app launch by itself — every network
+      call here is the direct result of something the owner pressed.
+      MediaPipe's telemetry uploader shares this permission but has nowhere to
+      send anything the owner has not asked for.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      Lets the owner install a downloaded update APK from inside the app,
+      the same as opening one from Downloads. This never installs anything by
+      itself — it only hands a file to Android's own installer screen, which
+      always requires the owner's explicit tap to proceed.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="false"
