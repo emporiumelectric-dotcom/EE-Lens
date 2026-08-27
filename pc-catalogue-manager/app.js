@@ -315,6 +315,19 @@ function collectSpecs() {
   current.product.specs = specs;
 }
 
+/**
+ * Folds the dedicated Wattage field into specs, mirroring how fillForm()
+ * reads it back out of specs.Wattage. Only ever sets it when the owner
+ * typed something here -- leaving it blank never deletes a Wattage value
+ * entered as its own spec row instead (e.g. via "Add usual ... fields");
+ * that row's own Remove button is what clears it.
+ */
+function applyWattageField(fieldId) {
+  const value = $(fieldId).value.trim();
+  if (!value) return;
+  current.product.specs = { ...current.product.specs, Wattage: value };
+}
+
 function collectForm() {
   const p = current.product;
   p.brand = $('f-brand').value.trim();
