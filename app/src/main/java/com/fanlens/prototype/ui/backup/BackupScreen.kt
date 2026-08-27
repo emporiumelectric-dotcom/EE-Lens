@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -199,6 +200,83 @@ fun BackupScreen(viewModel: BackupViewModel) {
         Spacer(Modifier.height(20.dp))
 
         Text(
+            "Cloud sync",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = FanLensColors.Ink
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Keeps this phone and the PC Catalogue Manager reading and writing the same " +
+                "products over the internet, instead of passing a catalogue file by hand. " +
+                "Pulling never needs a sign-in; pushing your changes does.",
+            style = MaterialTheme.typography.bodySmall,
+            color = FanLensColors.InkMuted
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            if (state.cloudSignedIn) "Signed in as ${state.cloudEmail}" else "Not signed in",
+            style = MaterialTheme.typography.labelMedium,
+            color = FanLensColors.InkMuted
+        )
+        Text(
+            "Last pushed: ${cloudWhenLabel(state.cloudLastPushAt)} · Last pulled: ${cloudWhenLabel(state.cloudLastPullAt)}",
+            style = MaterialTheme.typography.labelSmall,
+            color = FanLensColors.InkMuted
+        )
+        Spacer(Modifier.height(12.dp))
+
+        Row(Modifier.fillMaxWidth()) {
+            Button(
+                onClick = viewModel::cloudPush,
+                enabled = !state.cloudBusy,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = FanLensColors.BrandRed,
+                    contentColor = FanLensColors.Paper
+                )
+            ) { Text("Push to cloud", fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.width(10.dp))
+            OutlinedButton(
+                onClick = viewModel::cloudPull,
+                enabled = !state.cloudBusy,
+                modifier = Modifier.weight(1f)
+            ) { Text("Pull from cloud") }
+        }
+        Spacer(Modifier.height(8.dp))
+        TextButton(onClick = { if (state.cloudSignedIn) viewModel.cloudSignOut() else viewModel.openCloudSignIn() }) {
+            Text(if (state.cloudSignedIn) "Sign out of the cloud" else "Sign in to push changes")
+        }
+
+        if (state.cloudBusy) {
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(
+                    modifier = Modifier.width(18.dp).height(18.dp),
+                    color = FanLensColors.BrandRed,
+                    strokeWidth = 2.dp
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(state.cloudBusyMessage, color = FanLensColors.InkMuted)
+            }
+        }
+
+        state.cloudMessage?.let { message ->
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (state.cloudMessageIsProblem) MaterialTheme.colorScheme.error else FanLensColors.Ink
+            )
+            Spacer(Modifier.height(4.dp))
+            TextButton(onClick = viewModel::consumeCloudMessage) { Text("OK") }
+        }
+
+        Spacer(Modifier.height(28.dp))
+        HorizontalDivider(color = FanLensColors.Rule)
+        Spacer(Modifier.height(20.dp))
+
+        Text(
             "App updates",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
@@ -335,5 +413,58 @@ fun BackupScreen(viewModel: BackupViewModel) {
                 }
             }
         )
+    }
+
+    if (state.showCloudSignIn) {
+        AlertDialog(
+            onDismissRequest = viewModel::closeCloudSignIn,
+            title = { Text("Sign in to the cloud") },
+            text = {
+                Column {
+                    Text(
+                        "Sign in to push products to the cloud. Pulling never needs this.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = FanLensColors.InkMuted
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = state.cloudSignInEmail,
+                        onValueChange = viewModel::setCloudSignInEmail,
+                        label = { Text("Email") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = state.cloudSignInPassword,
+                        onValueChange = viewModel::setCloudSignInPassword,
+                        label = { Text("Password") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::cloudSignIn, enabled = !state.cloudBusy) { Text("Sign in") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::closeCloudSignIn) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+/** "3 hours ago"-style label for the last cloud push/pull, mirroring the phone-sync one. */
+private fun cloudWhenLabel(whenMs: Long?): String {
+    if (whenMs == null) return "never"
+    val minutes = (System.currentTimeMillis() - whenMs) / 60_000
+    return when {
+        minutes < 1 -> "just now"
+        minutes < 60 -> "$minutes minutes ago"
+        minutes < 60 * 24 -> "${minutes / 60} hours ago"
+        else -> "${minutes / (60 * 24)} days ago"
     }
 }

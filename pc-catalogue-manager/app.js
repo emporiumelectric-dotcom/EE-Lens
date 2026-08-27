@@ -534,6 +534,7 @@ async function saveProduct() {
   await putProduct(p);
   await putPhotos(current.photos);
   await renderList();
+  cloudBackgroundPush(p);
 
   if (wasNew) {
     // Entering a catalogue means one product after another, so a saved new
@@ -569,6 +570,7 @@ async function removeCurrentProduct() {
   showEditor(false);
   await renderList();
   toast('Product deleted');
+  if (isSignedIn()) cloudDeleteProduct(p.id);
 }
 
 /* ---------- import / export ---------- */
@@ -1305,6 +1307,50 @@ async function pullFromPhone() {
   }
 }
 
+/* ---------- cloud sync ---------- */
+
+function cloudWhenLabel(ms) {
+  if (!ms) return 'never';
+  const mins = Math.round((Date.now() - ms) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} minutes ago`;
+  const hours = Math.round(mins / 60);
+  return hours < 24 ? `${hours} hours ago` : new Date(ms).toLocaleString();
+}
+
+function refreshCloudHints() {
+  $('cloud-push-at').textContent = `Last pushed: ${cloudWhenLabel(cloudLastSyncAt('push'))}`;
+  $('cloud-pull-at').textContent = `Last pulled: ${cloudWhenLabel(cloudLastSyncAt('pull'))}`;
+}
+
+function openCloudModal() {
+  refreshCloudHints();
+  $('cloud-progress').hidden = true;
+  $('cloud-modal').hidden = false;
+}
+
+async function runCloudSync(direction) {
+  const progressEl = $('cloud-progress');
+  progressEl.hidden = false;
+  const label = direction === 'push' ? 'Pushing' : 'Pulling';
+  progressEl.textContent = `${label}…`;
+  busy(true, `${label} the catalogue…`);
+  try {
+    const summary = direction === 'push'
+      ? await cloudPushAll((done, total) => { progressEl.textContent = `${label} ${done} of ${total}…`; })
+      : await cloudPullAll((done, total) => { progressEl.textContent = `${label} ${done} of ${total}…`; });
+    const count = direction === 'push' ? summary.pushed : summary.pulled;
+    const failedNote = summary.failed ? ` · ${summary.failed} failed, see the browser console` : '';
+    toast(`${direction === 'push' ? 'Pushed' : 'Pulled'} ${count} of ${summary.total} products${failedNote}`, summary.failed > 0);
+    if (direction === 'pull') await renderList();
+  } catch (error) {
+    toast(error.message || 'Cloud sync failed.', true);
+  } finally {
+    busy(false);
+    refreshCloudHints();
+  }
+}
+
 /* ---------- housekeeping ---------- */
 
 /** Photos left behind by a product that was never saved. */
@@ -1408,6 +1454,15 @@ function wire() {
   $('sync-close').addEventListener('click', () => { $('sync-modal').hidden = true; });
   $('sync-push').addEventListener('click', pushToPhone);
   $('sync-pull').addEventListener('click', pullFromPhone);
+
+  $('cloud-btn').addEventListener('click', openCloudModal);
+  $('cloud-close').addEventListener('click', () => { $('cloud-modal').hidden = true; });
+  $('cloud-push').addEventListener('click', () => runCloudSync('push'));
+  $('cloud-pull').addEventListener('click', () => runCloudSync('pull'));
+  $('cloud-modal').addEventListener('click', (e) => {
+    if (e.target === $('cloud-modal')) $('cloud-modal').hidden = true;
+  });
+
   $('sync-modal').addEventListener('click', (e) => {
     if (e.target === $('sync-modal')) $('sync-modal').hidden = true;
   });

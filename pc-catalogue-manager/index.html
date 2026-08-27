@@ -18,6 +18,7 @@
     <button id="import-btn" class="btn ghost" type="button">Import .eelens</button>
     <button id="export-btn" class="btn solid" type="button">Export .eelens</button>
     <button id="sync-btn" class="btn ghost" type="button" hidden>Phone sync</button>
+    <button id="cloud-btn" class="btn ghost" type="button">Cloud sync</button>
     <button id="auth-btn" class="btn ghost" type="button">Sign in</button>
     <input id="import-file" type="file" accept=".eelens,.zip" hidden />
   </div>
@@ -286,6 +287,34 @@
   </div>
 </div>
 
+<div id="cloud-modal" class="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
+    <div class="modal-head">
+      <h2 id="cloud-title">Cloud sync</h2>
+      <button id="cloud-close" class="btn ghost small" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-note">
+        Syncs this catalogue with Electric Emporium's Supabase project, so the PC and the
+        phone both see the same products without passing a .eelens file by hand. Reading is
+        always open; pushing changes needs you signed in.
+      </p>
+
+      <h3 class="preview-h">Send your changes to the cloud</h3>
+      <p class="modal-note">Pushes every product and photo here that the cloud does not already have.</p>
+      <button id="cloud-push" class="btn solid" type="button">Push to cloud</button>
+      <p class="hint" id="cloud-push-at"></p>
+
+      <h3 class="preview-h">Bring in the cloud's changes</h3>
+      <p class="modal-note">Pulls in anything added or changed elsewhere (the phone, or another PC).</p>
+      <button id="cloud-pull" class="btn ghost" type="button">Pull from cloud</button>
+      <p class="hint" id="cloud-pull-at"></p>
+
+      <p id="cloud-progress" class="hint" hidden></p>
+    </div>
+  </div>
+</div>
+
 <input id="file-input" type="file" accept="image/*" multiple hidden />
 <div id="toast" class="toast" hidden></div>
 <div id="busy" class="busy" hidden><div class="busy-box"><span class="spinner"></span><span id="busy-text">Working…</span></div></div>
@@ -294,7 +323,9 @@
      index.html file is opened straight from disk. -->
 <script src="zip.js?v=1786867904"></script>
 <script src="storage.js?v=1786867904"></script>
+<script src="config.js?v=1786867904"></script>
 <script src="supabase.js?v=1786867904"></script>
+<script src="cloud.js?v=1786867904"></script>
 <script src="images.js?v=1786867904"></script>
 <script src="eelens.js?v=1786867904"></script>
 <script src="import-url.js?v=1786867904"></script>

@@ -24,6 +24,10 @@ interface ProductDao {
     @Query("SELECT id FROM products")
     suspend fun allIdsIncludingDeleted(): List<String>
 
+    /** Includes soft-deleted rows, so a cloud push also carries their deleted_at forward. */
+    @Query("SELECT * FROM products")
+    suspend fun allIncludingDeleted(): List<ProductEntity>
+
     @Query("SELECT COUNT(*) FROM products WHERE deleted_at IS NULL")
     suspend fun liveCount(): Int
 

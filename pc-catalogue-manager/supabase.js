@@ -5,11 +5,12 @@
  * everything else here.
  *
  * This step only handles who is signed in. Actually syncing the catalogue to
- * Supabase (push on save, pull on sign-in) is a separate, later step.
+ * Supabase (push on save, pull on sign-in) lives in cloud.js.
+ *
+ * SUPABASE_URL / SUPABASE_ANON_KEY come from config.js, loaded before this
+ * file.
  */
 
-const SUPABASE_URL = 'https://buzidwccluskdkccidev.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_Zm5PI1gxB8ZU6_m4Dydirw_THsgZR7x';
 const SESSION_KEY = 'ee-lens-session';
 
 let session = loadSession();

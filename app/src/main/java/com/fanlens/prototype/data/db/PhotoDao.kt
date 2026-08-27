@@ -48,6 +48,9 @@ interface PhotoDao {
     @Query("UPDATE photos SET role = :role WHERE id = :photoId")
     suspend fun setRole(photoId: String, role: String)
 
+    @Query("UPDATE photos SET synced_at = :syncedAt WHERE id = :photoId")
+    suspend fun setSyncedAt(photoId: String, syncedAt: Long)
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(photo: PhotoEntity)
 

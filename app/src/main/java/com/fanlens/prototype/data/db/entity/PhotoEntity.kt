@@ -60,5 +60,14 @@ data class PhotoEntity(
     val role: String,
 
     @ColumnInfo(name = "created_at")
-    val createdAt: Long
+    val createdAt: Long,
+
+    /**
+     * When this photo's bytes were last pushed to Supabase Storage, or null if
+     * never. Photo bytes never change after creation (only role/sortOrder can),
+     * so this alone is enough to skip re-uploading unchanged images on the next
+     * cloud sync.
+     */
+    @ColumnInfo(name = "synced_at")
+    val syncedAt: Long? = null
 )

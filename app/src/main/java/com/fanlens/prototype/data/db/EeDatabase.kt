@@ -20,7 +20,7 @@ import com.fanlens.prototype.data.db.entity.ProductEntity
         EmbeddingEntity::class,
         MetaEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class EeDatabase : RoomDatabase() {
@@ -39,6 +39,16 @@ abstract class EeDatabase : RoomDatabase() {
         const val KEY_LAST_EXPORT_AT = "last_export_at"
         const val KEY_SYNC_ADDRESS = "sync_address"
         const val KEY_SYNC_CODE = "sync_code"
+
+        // Supabase Auth session, for cloud catalogue sync. Never the service_role
+        // key -- this is the same email/password session a shop owner signs into,
+        // gating writes to the ee_lens tables exactly like the PC tool.
+        const val KEY_SUPABASE_ACCESS_TOKEN = "supabase_access_token"
+        const val KEY_SUPABASE_REFRESH_TOKEN = "supabase_refresh_token"
+        const val KEY_SUPABASE_EXPIRES_AT = "supabase_expires_at"
+        const val KEY_SUPABASE_EMAIL = "supabase_email"
+        const val KEY_CLOUD_LAST_PUSH_AT = "cloud_last_push_at"
+        const val KEY_CLOUD_LAST_PULL_AT = "cloud_last_pull_at"
 
         /**
          * Adds the photo role. Every existing photo becomes a recognition photo,
@@ -65,9 +75,20 @@ abstract class EeDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Adds cloud-sync bookkeeping. Every existing photo starts as never
+         * pushed, so the first cloud sync uploads what is already here rather
+         * than assuming it is already in Supabase.
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE photos ADD COLUMN synced_at INTEGER")
+            }
+        }
+
         fun build(context: Context): EeDatabase =
             Room.databaseBuilder(context.applicationContext, EeDatabase::class.java, NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 // Cascade deletes are declared on the entities; SQLite ignores them
                 // unless foreign keys are switched on for the connection.
                 .addCallback(object : Callback() {

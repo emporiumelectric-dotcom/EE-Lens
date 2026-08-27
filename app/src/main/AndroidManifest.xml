@@ -7,12 +7,16 @@
     <!--
       Used for: reaching the Catalogue Manager on the shop's own PC over local
       Wi-Fi (address typed by the owner, checked to be a private one, every
-      request carries the pairing code shown on the PC); and checking GitHub's
+      request carries the pairing code shown on the PC); checking GitHub's
       public releases page for a newer version when the owner presses "Check
-      for update". Nothing happens on app launch by itself — every network
-      call here is the direct result of something the owner pressed.
-      MediaPipe's telemetry uploader shares this permission but has nowhere to
-      send anything the owner has not asked for.
+      for update"; and cloud catalogue sync against Electric Emporium's
+      Supabase project (anon/publishable key only, gated by Row Level
+      Security — see com.fanlens.prototype.supabase), so this phone and the
+      PC tool read and write the same products. Nothing happens on app
+      launch by itself — every network call here is the direct result of
+      something the owner pressed. MediaPipe's telemetry uploader shares
+      this permission but has nowhere to send anything the owner has not
+      asked for.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
 

@@ -8,12 +8,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.fanlens.prototype.data.CatalogRepository
+import com.fanlens.prototype.data.EeGraph
+import com.fanlens.prototype.data.db.EeDatabase
 import com.fanlens.prototype.eelens.EelensException
 import com.fanlens.prototype.eelens.EelensReader
 import com.fanlens.prototype.eelens.EelensSyncClient
 import com.fanlens.prototype.eelens.ImportConflictPolicy
 import com.fanlens.prototype.eelens.ImportPreview
 import com.fanlens.prototype.eelens.StagedPackage
+import com.fanlens.prototype.supabase.CloudSyncManager
+import com.fanlens.prototype.supabase.SupabaseAuthClient
 import com.fanlens.prototype.update.UpdateChecker
 import com.fanlens.prototype.update.UpdateInfo
 import com.fanlens.prototype.update.UpdateInstaller
@@ -52,9 +56,21 @@ class BackupViewModel(
         val downloadProgress: Float = 0f,
         val readyApk: File? = null,
         val updateMessage: String? = null,
-        val updateMessageIsProblem: Boolean = false
+        val updateMessageIsProblem: Boolean = false,
+
+        val cloudEmail: String? = null,
+        val cloudSignInEmail: String = "",
+        val cloudSignInPassword: String = "",
+        val showCloudSignIn: Boolean = false,
+        val cloudBusy: Boolean = false,
+        val cloudBusyMessage: String = "",
+        val cloudMessage: String? = null,
+        val cloudMessageIsProblem: Boolean = false,
+        val cloudLastPushAt: Long? = null,
+        val cloudLastPullAt: Long? = null
     ) {
         val canSync: Boolean get() = syncAddress.isNotBlank() && syncCode.length >= 4
+        val cloudSignedIn: Boolean get() = cloudEmail != null
 
         val summaryLine: String
             get() = "$productCount products · $photoCount photos · " +
@@ -68,12 +84,22 @@ class BackupViewModel(
 
     private val sync = EelensSyncClient()
 
+    private val database = EeGraph.database(context)
+    private val cloudAuth = SupabaseAuthClient(database.metaDao())
+    private val cloudSync = CloudSyncManager(database, repository.photoStore, cloudAuth)
+
     init {
         refreshCounts()
         viewModelScope.launch {
             _state.update {
                 it.copy(syncAddress = repository.syncAddress(), syncCode = repository.syncCode())
             }
+        }
+        viewModelScope.launch {
+            val email = cloudAuth.currentSession()?.email
+            val lastPush = database.metaDao().value(EeDatabase.KEY_CLOUD_LAST_PUSH_AT)?.toLongOrNull()
+            val lastPull = database.metaDao().value(EeDatabase.KEY_CLOUD_LAST_PULL_AT)?.toLongOrNull()
+            _state.update { it.copy(cloudEmail = email, cloudLastPushAt = lastPush, cloudLastPullAt = lastPull) }
         }
     }
 
@@ -278,6 +304,118 @@ class BackupViewModel(
     }
 
     fun consumeMessage() = _state.update { it.copy(message = null) }
+
+    /* ---------- cloud sync ---------- */
+
+    fun setCloudSignInEmail(value: String) = _state.update { it.copy(cloudSignInEmail = value) }
+
+    fun setCloudSignInPassword(value: String) = _state.update { it.copy(cloudSignInPassword = value) }
+
+    fun openCloudSignIn() = _state.update {
+        it.copy(showCloudSignIn = true, cloudSignInPassword = "", cloudSignInEmail = it.cloudEmail ?: it.cloudSignInEmail)
+    }
+
+    fun closeCloudSignIn() = _state.update { it.copy(showCloudSignIn = false) }
+
+    fun cloudSignIn() {
+        val current = _state.value
+        if (current.cloudSignInEmail.isBlank() || current.cloudSignInPassword.isBlank()) {
+            _state.update { it.copy(cloudMessageIsProblem = true, cloudMessage = "Enter both an email and a password.") }
+            return
+        }
+        _state.update { it.copy(cloudBusy = true, cloudBusyMessage = "Signing in…", cloudMessage = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { cloudAuth.signIn(current.cloudSignInEmail.trim(), current.cloudSignInPassword) }
+            }.onSuccess { session ->
+                _state.update {
+                    it.copy(
+                        cloudBusy = false, showCloudSignIn = false, cloudEmail = session.email,
+                        cloudSignInPassword = "", cloudMessage = "Signed in as ${session.email}", cloudMessageIsProblem = false
+                    )
+                }
+            }.onFailure { error ->
+                Log.e(TAG, "Cloud sign in failed", error)
+                _state.update {
+                    it.copy(cloudBusy = false, cloudMessageIsProblem = true, cloudMessage = error.message ?: "Sign in failed.")
+                }
+            }
+        }
+    }
+
+    fun cloudSignOut() {
+        _state.update { it.copy(cloudBusy = true, cloudBusyMessage = "Signing out…") }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { cloudAuth.signOut() }
+            _state.update {
+                it.copy(cloudBusy = false, cloudEmail = null, cloudMessage = "Signed out", cloudMessageIsProblem = false)
+            }
+        }
+    }
+
+    /** Pushes every product on this phone to the cloud. Needs a signed-in session. */
+    fun cloudPush() {
+        if (!_state.value.cloudSignedIn) { openCloudSignIn(); return }
+        _state.update { it.copy(cloudBusy = true, cloudBusyMessage = "Pushing to the cloud…", cloudMessage = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    cloudSync.pushAll { done, total ->
+                        _state.update { it.copy(cloudBusyMessage = "Pushing to the cloud — $done of $total") }
+                    }
+                }
+            }.onSuccess { summary ->
+                val now = System.currentTimeMillis()
+                database.metaDao().put(EeDatabase.KEY_CLOUD_LAST_PUSH_AT, now.toString())
+                val failedNote = if (summary.failed > 0) " · ${summary.failed} failed" else ""
+                _state.update {
+                    it.copy(
+                        cloudBusy = false, cloudLastPushAt = now, cloudMessageIsProblem = summary.failed > 0,
+                        cloudMessage = "Pushed ${summary.processed} of ${summary.total} products$failedNote."
+                    )
+                }
+            }.onFailure { error ->
+                Log.e(TAG, "Cloud push failed", error)
+                _state.update {
+                    it.copy(cloudBusy = false, cloudMessageIsProblem = true, cloudMessage = error.message ?: "The cloud push failed.")
+                }
+            }
+        }
+    }
+
+    /** Pulls in changes from the cloud. Works even signed out -- reading is open to everyone. */
+    fun cloudPull() {
+        _state.update { it.copy(cloudBusy = true, cloudBusyMessage = "Pulling from the cloud…", cloudMessage = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    cloudSync.pullAll { done, total ->
+                        _state.update { it.copy(cloudBusyMessage = "Pulling from the cloud — $done of $total") }
+                    }
+                }
+            }.onSuccess { summary ->
+                val now = System.currentTimeMillis()
+                database.metaDao().put(EeDatabase.KEY_CLOUD_LAST_PULL_AT, now.toString())
+                refreshCounts()
+                onCatalogueChanged()
+                val failedNote = if (summary.failed > 0) " · ${summary.failed} failed" else ""
+                _state.update {
+                    it.copy(
+                        cloudBusy = false, cloudLastPullAt = now, cloudMessageIsProblem = summary.failed > 0,
+                        cloudMessage = "Pulled ${summary.processed} of ${summary.total} products$failedNote. " +
+                            "Recognition is preparing any new photos now."
+                    )
+                }
+            }.onFailure { error ->
+                Log.e(TAG, "Cloud pull failed", error)
+                _state.update {
+                    it.copy(cloudBusy = false, cloudMessageIsProblem = true, cloudMessage = error.message ?: "The cloud pull failed.")
+                }
+            }
+        }
+    }
+
+    fun consumeCloudMessage() = _state.update { it.copy(cloudMessage = null) }
 
     /* ---------- app updates ---------- */
 
