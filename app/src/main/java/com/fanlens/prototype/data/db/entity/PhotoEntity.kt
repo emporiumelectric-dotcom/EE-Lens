@@ -69,5 +69,9 @@ data class PhotoEntity(
      * cloud sync.
      */
     @ColumnInfo(name = "synced_at")
-    val syncedAt: Long? = null
+    val syncedAt: Long? = null,
+
+    /** Same idea as ProductEntity.cloudClientId, for a photo whose id is not itself a UUID. */
+    @ColumnInfo(name = "cloud_client_id")
+    val cloudClientId: String? = null
 )

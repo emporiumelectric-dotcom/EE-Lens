@@ -15,17 +15,64 @@
  *
  * Local <-> remote field mapping, because the live ee_lens schema is
  * narrower than the local one:
- *   - local id (a UUID)         <-> remote client_id (uuid, unique)
+ *   - local id (usually a UUID) <-> remote client_id (uuid, unique)
  *   - local priceMinor (paise)  <-> remote price (numeric rupees)
  *   - local sizeSweepMm (int)   <-> remote size (free text, "1200mm")
  *   - local role recognition/display <-> remote role shop/catalogue
  *   - slug/mrpMinor/currency/source have no remote column and stay local-only;
  *     .eelens keeps the full picture.
  *   - remote products.deleted_at mirrors local soft-delete.
+ *
+ * Not every local id is a UUID: the bundled demo catalogue (seeded on the
+ * phone and carried over here by import) uses fixed slugs like
+ * "havells-enticer-vineer", which the uuid-typed client_id column rejects
+ * outright ("invalid input syntax for type uuid"). For a row like that, a
+ * UUID is generated once, sent as client_id, and written back onto the local
+ * record as cloudClientId -- so every later push and pull agrees on the same
+ * cloud identity instead of minting a new one (and a new duplicate remote
+ * row) every time.
  */
 
 function cloudPhotoPath(productId, photoId) {
   return `${productId}/${photoId}.jpg`;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidUuid(value) {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
+/** The client_id to use for this product/photo, without persisting anything. */
+function resolveCloudClientId(entity) {
+  if (isValidUuid(entity.id)) return entity.id;
+  if (isValidUuid(entity.cloudClientId)) return entity.cloudClientId;
+  return uuid();
+}
+
+/** Resolves this product's client_id, persisting a freshly generated one so it is stable next time. */
+async function resolveProductClientId(product) {
+  const clientId = resolveCloudClientId(product);
+  if (clientId !== product.id && clientId !== product.cloudClientId) {
+    product.cloudClientId = clientId;
+    await putProduct(product);
+  }
+  return clientId;
+}
+
+/**
+ * Resolves this photo's client_id, persisting a freshly generated one
+ * immediately (not batched) so a push that fails partway through a
+ * product's photos does not mint a different id -- and a duplicate remote
+ * row -- for the same photo on retry.
+ */
+async function resolvePhotoClientId(photo) {
+  const clientId = resolveCloudClientId(photo);
+  if (clientId !== photo.id && clientId !== photo.cloudClientId) {
+    photo.cloudClientId = clientId;
+    await putPhoto(photo);
+  }
+  return clientId;
 }
 
 function localRoleToCloud(role) {
@@ -111,8 +158,14 @@ async function cloudUploadPhoto(productId, photo, headers) {
   }
 }
 
-async function cloudDownloadPhoto(productId, photoId, headers) {
-  const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_PHOTOS_BUCKET}/${cloudPhotoPath(productId, photoId)}`;
+/**
+ * Downloads by the storage_path the row itself carries, rather than
+ * reconstructing one from local ids -- the device pulling a photo may not
+ * use the same local ids as the device that pushed it (see cloudClientId
+ * above), so the row's own path is the only value both can agree on.
+ */
+async function cloudDownloadPhoto(storagePath, headers) {
+  const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_PHOTOS_BUCKET}/${storagePath}`;
   const response = await fetch(url, {
     headers: { apikey: headers.apikey, Authorization: headers.Authorization }
   });
@@ -127,8 +180,9 @@ async function cloudDownloadPhoto(productId, photoId, headers) {
  * whole product.
  */
 async function cloudPushProduct(product, headers) {
+  const clientId = await resolveProductClientId(product);
   const remoteProduct = {
-    client_id: product.id,
+    client_id: clientId,
     brand: product.brand || '',
     name: product.name || '',
     model: product.model || null,
@@ -152,6 +206,7 @@ async function cloudPushProduct(product, headers) {
   const remotePhotoIdByLocalId = {};
   let touched = false;
   for (const photo of photos) {
+    const photoClientId = await resolvePhotoClientId(photo);
     if (photo.cloudPushedSha256 !== photo.sha256) {
       await cloudUploadPhoto(product.id, photo, headers);
       photo.cloudPushedSha256 = photo.sha256;
@@ -161,7 +216,7 @@ async function cloudPushProduct(product, headers) {
       'POST',
       'product_photos',
       {
-        client_id: photo.id,
+        client_id: photoClientId,
         product_id: savedProduct.id,
         role: localRoleToCloud(photo.role),
         storage_path: cloudPhotoPath(product.id, photo.id),
@@ -202,13 +257,19 @@ function cloudBackgroundPush(product) {
   })();
 }
 
-/** Marks a product deleted in the cloud. Call this at the moment of local delete. */
-async function cloudDeleteProduct(productId) {
+/**
+ * Marks a product deleted in the cloud. Call this at the moment of local
+ * delete, with the product object still in hand -- once deleteProduct() has
+ * run there is nothing left locally to read a cloudClientId back from.
+ */
+async function cloudDeleteProduct(product) {
+  const clientId = isValidUuid(product.id) ? product.id : product.cloudClientId;
+  if (!clientId) return; // never successfully pushed -- nothing in the cloud to mark deleted
   try {
     const headers = await cloudAuthHeaders(true);
     await cloudRest('PATCH', 'products', { deleted_at: new Date().toISOString() }, {
       headers,
-      query: `client_id=eq.${productId}`
+      query: `client_id=eq.${clientId}`
     });
   } catch (error) {
     console.error('Cloud delete failed', error);
@@ -252,6 +313,11 @@ async function cloudPullAll(onProgress) {
   });
   const localAll = await listProducts();
   const localById = new Map(localAll.map((p) => [p.id, p]));
+  // Legacy-id products (the bundled catalogue) are pushed under a generated
+  // cloudClientId instead of their real id -- match on that too, or a remote
+  // row with no local match yet reads as brand new every single pull.
+  const localByCloudClientId = new Map(localAll.filter((p) => p.cloudClientId).map((p) => [p.cloudClientId, p]));
+  const findLocalProduct = (clientId) => localById.get(clientId) || localByCloudClientId.get(clientId) || null;
 
   let pulled = 0;
   const failed = [];
@@ -261,31 +327,42 @@ async function cloudPullAll(onProgress) {
     if (!rp.client_id) continue; // a row nothing here created yet; no local id to match
 
     try {
+      const localProduct = findLocalProduct(rp.client_id);
+      // The row a legacy-id product owns locally keeps its real id -- never
+      // rename it to the cloud's generated UUID underneath the owner.
+      const localId = localProduct ? localProduct.id : rp.client_id;
+
       if (rp.deleted_at) {
-        if (localById.has(rp.client_id)) await deleteProduct(rp.client_id);
+        if (localProduct) await deleteProduct(localId);
         continue;
       }
 
       const remoteUpdatedAt = new Date(rp.updated_at).getTime();
-      const localProduct = localById.get(rp.client_id);
       if (localProduct && localProduct.updatedAt >= remoteUpdatedAt) continue; // local wins, unchanged
 
       const remotePhotos = await cloudRest('GET', 'product_photos', undefined, {
         headers,
         query: `product_id=eq.${rp.id}&select=*&order=sort_order.asc`
       });
-      const existingPhotos = await photosFor(rp.client_id);
-      const existingPhotoIds = new Set(existingPhotos.map((p) => p.id));
+      const existingPhotos = await photosFor(localId);
+      // Same idea for photos: a legacy-id photo's client_id (its cloudClientId)
+      // does not equal its local id, so map through both to find what is
+      // already here -- and to resolve the cover photo below.
+      const localPhotoIdByCloudId = new Map();
+      existingPhotos.forEach((p) => {
+        localPhotoIdByCloudId.set(p.id, p.id);
+        if (p.cloudClientId) localPhotoIdByCloudId.set(p.cloudClientId, p.id);
+      });
 
       const newPhotos = [];
       for (const rphoto of remotePhotos) {
-        if (!rphoto.client_id || existingPhotoIds.has(rphoto.client_id)) continue;
-        const blob = await cloudDownloadPhoto(rp.client_id, rphoto.client_id, headers);
+        if (!rphoto.client_id || localPhotoIdByCloudId.has(rphoto.client_id)) continue;
+        const blob = await cloudDownloadPhoto(rphoto.storage_path, headers);
         const bytes = new Uint8Array(await blob.arrayBuffer());
         const dims = await imageDimensions(blob);
         newPhotos.push({
           id: rphoto.client_id,
-          productId: rp.client_id,
+          productId: localId,
           blob,
           sha256: rphoto.checksum || (await sha256Hex(bytes)),
           cloudPushedSha256: rphoto.checksum || undefined,
@@ -296,17 +373,23 @@ async function cloudPullAll(onProgress) {
           origin: 'import',
           role: cloudToLocalRole(rphoto.role)
         });
+        // A brand new local photo adopts the cloud's id directly -- map it to
+        // itself so a cover-photo match against it below still resolves.
+        localPhotoIdByCloudId.set(rphoto.client_id, rphoto.client_id);
       }
 
       let coverPhotoId = localProduct?.coverPhotoId ?? null;
       if (rp.cover_photo_id != null) {
         const coverRemote = remotePhotos.find((x) => x.id === rp.cover_photo_id);
-        if (coverRemote?.client_id) coverPhotoId = coverRemote.client_id;
+        if (coverRemote?.client_id) {
+          coverPhotoId = localPhotoIdByCloudId.get(coverRemote.client_id) || coverPhotoId;
+        }
       }
 
       const product = {
-        id: rp.client_id,
-        slug: localProduct?.slug || slugify(rp.brand, rp.name, rp.client_id),
+        id: localId,
+        cloudClientId: localProduct?.cloudClientId,
+        slug: localProduct?.slug || slugify(rp.brand, rp.name, localId),
         brand: rp.brand || '',
         name: rp.name || '',
         model: rp.model || '',

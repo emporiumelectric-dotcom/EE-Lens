@@ -51,6 +51,10 @@ interface PhotoDao {
     @Query("UPDATE photos SET synced_at = :syncedAt WHERE id = :photoId")
     suspend fun setSyncedAt(photoId: String, syncedAt: Long)
 
+    /** For a legacy-id photo whose local id is not the cloud's client_id -- see PhotoEntity.cloudClientId. */
+    @Query("UPDATE photos SET cloud_client_id = :cloudClientId WHERE id = :photoId")
+    suspend fun setCloudClientId(photoId: String, cloudClientId: String)
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(photo: PhotoEntity)
 

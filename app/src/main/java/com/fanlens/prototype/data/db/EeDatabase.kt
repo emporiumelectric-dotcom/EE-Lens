@@ -20,7 +20,7 @@ import com.fanlens.prototype.data.db.entity.ProductEntity
         EmbeddingEntity::class,
         MetaEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class EeDatabase : RoomDatabase() {
@@ -86,9 +86,21 @@ abstract class EeDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Adds a stable, generated cloud identity for products/photos whose
+         * local id is not itself a UUID -- the bundled demo catalogue's fixed
+         * slugs, which Supabase's uuid-typed client_id column rejects.
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE products ADD COLUMN cloud_client_id TEXT")
+                connection.execSQL("ALTER TABLE photos ADD COLUMN cloud_client_id TEXT")
+            }
+        }
+
         fun build(context: Context): EeDatabase =
             Room.databaseBuilder(context.applicationContext, EeDatabase::class.java, NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 // Cascade deletes are declared on the entities; SQLite ignores them
                 // unless foreign keys are switched on for the connection.
                 .addCallback(object : Callback() {

@@ -71,5 +71,16 @@ data class ProductEntity(
 
     /** Soft delete. NULL means live; a timestamp means hidden and pending purge. */
     @ColumnInfo(name = "deleted_at")
-    val deletedAt: Long?
+    val deletedAt: Long?,
+
+    /**
+     * A generated UUID to use as this product's Supabase client_id, for
+     * products whose [id] is not itself a UUID -- the bundled demo catalogue
+     * uses fixed slugs like "havells-enticer-vineer", which the uuid-typed
+     * client_id column rejects. Null until the first cloud push needs one;
+     * once set it never changes, so push/pull always agree on the same
+     * cloud identity for this product.
+     */
+    @ColumnInfo(name = "cloud_client_id")
+    val cloudClientId: String? = null
 )

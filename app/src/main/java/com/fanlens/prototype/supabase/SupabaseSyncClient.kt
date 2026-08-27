@@ -90,12 +90,16 @@ class SupabaseSyncClient {
         }
     }
 
-    /** Reading is open to anon; no session is required to download. */
-    fun downloadPhoto(productClientId: String, photoClientId: String): ByteArray {
-        val url = URL(
-            "${SupabaseConfig.URL}/storage/v1/object/${SupabaseConfig.PHOTOS_BUCKET}/" +
-                photoStoragePath(productClientId, photoClientId)
-        )
+    /**
+     * Downloads by the storage_path the row itself carries, rather than
+     * reconstructing one from local ids -- the device pulling a photo may
+     * not use the same local ids as the device that pushed it (a legacy-id
+     * product's client_id is a generated UUID, not its local id), so the
+     * row's own path is the only value both can agree on. Reading is open
+     * to anon; no session is required to download.
+     */
+    fun downloadPhoto(storagePath: String): ByteArray {
+        val url = URL("${SupabaseConfig.URL}/storage/v1/object/${SupabaseConfig.PHOTOS_BUCKET}/$storagePath")
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 15_000
