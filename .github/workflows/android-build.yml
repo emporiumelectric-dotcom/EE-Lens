@@ -1,0 +1,62 @@
+name: Android build
+
+# Compiles the app and runs its unit tests on GitHub's own runners. This
+# exists because the sandbox that wrote the Supabase cloud-sync changes had
+# no way to build the app itself -- its network policy blocks
+# dl.google.com, which the Android Gradle Plugin and every AndroidX
+# dependency come from. GitHub-hosted runners have no such restriction.
+#
+# This verifies the app COMPILES and its existing unit tests pass. It does
+# not install or run the app, and it never touches Supabase -- exercising
+# the Cloud sync screen against the real database still needs a real device
+# or emulator, run by a person.
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache/restore Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Upload debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
