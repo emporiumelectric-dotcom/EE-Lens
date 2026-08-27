@@ -15,9 +15,11 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +40,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -61,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
@@ -116,7 +121,9 @@ fun ElectricEmporiumScreen(
     var status by remember { mutableStateOf("Preparing local products…") }
     var zoomRatio by remember { mutableStateOf(1f) }
     var route by remember { mutableStateOf<EeRoute>(EeRoute.Tabs) }
-    var recentlyDeleted by remember { mutableStateOf<Product?>(null) }
+    // A single delete (detail screen) and a bulk delete (Products list) both land
+    // here -- one product or several, the undo bar and purge timer below don't care.
+    var recentlyDeleted by remember { mutableStateOf<List<Product>>(emptyList()) }
     var refreshingCatalogue by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
@@ -135,13 +142,14 @@ fun ElectricEmporiumScreen(
         status = preparation.message
     }
 
-    // A deleted product is only removed from disk once the undo window closes.
-    LaunchedEffect(recentlyDeleted?.id) {
-        val target = recentlyDeleted ?: return@LaunchedEffect
+    // Deleted products are only removed from disk once the undo window closes.
+    LaunchedEffect(recentlyDeleted) {
+        val targets = recentlyDeleted
+        if (targets.isEmpty()) return@LaunchedEffect
         delay(UNDO_WINDOW_MS)
-        if (recentlyDeleted?.id == target.id) {
+        if (recentlyDeleted == targets) {
             repository.purgeDeletedBefore(System.currentTimeMillis())
-            recentlyDeleted = null
+            recentlyDeleted = emptyList()
         }
     }
 
@@ -161,7 +169,7 @@ fun ElectricEmporiumScreen(
                 onEdit = { route = EeRoute.Edit(it) },
                 onDelete = { productId ->
                     scope.launch {
-                        recentlyDeleted = products.firstOrNull { it.id == productId }
+                        recentlyDeleted = listOfNotNull(products.firstOrNull { it.id == productId })
                         repository.softDeleteProduct(productId)
                         route = EeRoute.Tabs
                         refreshRecognition()
@@ -276,7 +284,14 @@ fun ElectricEmporiumScreen(
                             }
                         },
                         onSelect = { route = EeRoute.Detail(it.id) },
-                        onAdd = { route = EeRoute.Edit(null) }
+                        onAdd = { route = EeRoute.Edit(null) },
+                        onDeleteSelected = { ids ->
+                            scope.launch {
+                                recentlyDeleted = products.filter { it.id in ids }
+                                ids.forEach { repository.softDeleteProduct(it) }
+                                refreshRecognition()
+                            }
+                        }
                     )
 
                     EeSection.Backup -> {
@@ -310,13 +325,17 @@ fun ElectricEmporiumScreen(
             }
         }
 
-        recentlyDeleted?.let { deleted ->
+        recentlyDeleted.takeIf { it.isNotEmpty() }?.let { deleted ->
             EeUndoBar(
-                message = "${deleted.name} deleted",
+                message = if (deleted.size == 1) {
+                    "${deleted.first().name} deleted"
+                } else {
+                    "${deleted.size} products deleted"
+                },
                 onUndo = {
                     scope.launch {
-                        repository.restoreProduct(deleted.id)
-                        recentlyDeleted = null
+                        deleted.forEach { repository.restoreProduct(it.id) }
+                        recentlyDeleted = emptyList()
                         refreshRecognition()
                     }
                 },
@@ -776,12 +795,49 @@ private fun EeProductCatalogue(
     refreshing: Boolean,
     onRefresh: () -> Unit,
     onSelect: (Product) -> Unit,
-    onAdd: () -> Unit
+    onAdd: () -> Unit,
+    onDeleteSelected: (List<String>) -> Unit
 ) {
+    // Long-press (or the "Select" button) enters selection mode; a plain tap then
+    // toggles a row instead of opening it. Lives entirely here -- the parent only
+    // ever hears about it once, as the finished list of ids to delete.
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // The list this is checked against can change out from under it (a pull-to-
+    // refresh, a cloud pull on the Backup tab) -- drop anything no longer here.
+    LaunchedEffect(products) {
+        val liveIds = products.mapTo(mutableSetOf()) { it.id }
+        val pruned = selectedIds.filterTo(mutableSetOf()) { it in liveIds }
+        if (pruned != selectedIds) selectedIds = pruned
+    }
+
+    fun exitSelection() {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+
+    fun toggle(id: String) {
+        selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
+    }
+
+    BackHandler(enabled = selectionMode) { exitSelection() }
+
     // The Add button is docked below the list rather than floating over it: a
     // floating button covers rows whenever the list is short or mid-scroll, and
     // no amount of bottom padding prevents that.
     Column(Modifier.fillMaxSize().background(FanLensColors.Paper)) {
+      if (selectionMode) {
+          EeSelectionBar(
+              count = selectedIds.size,
+              onCancel = ::exitSelection,
+              onDeleteSelected = {
+                  onDeleteSelected(selectedIds.toList())
+                  exitSelection()
+              }
+          )
+          HorizontalDivider(color = FanLensColors.Rule)
+      }
       PullToRefreshBox(
           isRefreshing = refreshing,
           onRefresh = onRefresh,
@@ -797,31 +853,54 @@ private fun EeProductCatalogue(
             )
         ) {
             item {
-                Text(
-                    text = "Products",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = FanLensColors.Ink
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = if (products.isEmpty()) {
-                        "No products yet. Tap Add product to create the first one."
-                    } else {
-                        "Tap a product to view its details."
-                    },
-                    color = FanLensColors.InkMuted
-                )
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "Products",
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = FanLensColors.Ink
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = if (products.isEmpty()) {
+                                "No products yet. Tap Add product to create the first one."
+                            } else if (selectionMode) {
+                                "Tap products to select them, or press and hold to start."
+                            } else {
+                                "Tap a product to view its details. Press and hold to select several."
+                            },
+                            color = FanLensColors.InkMuted
+                        )
+                    }
+                    if (!selectionMode && products.isNotEmpty()) {
+                        TextButton(onClick = { selectionMode = true }) {
+                            Text("Select", fontWeight = FontWeight.Bold, color = FanLensColors.BrandRed)
+                        }
+                    }
+                }
                 Spacer(Modifier.height(20.dp))
             }
 
             items(products, key = { it.id }) { product ->
-                EeProductRow(product = product, repository = repository, onSelect = onSelect)
+                EeProductRow(
+                    product = product,
+                    repository = repository,
+                    selectionMode = selectionMode,
+                    selected = product.id in selectedIds,
+                    onSelect = onSelect,
+                    onToggleSelected = { toggle(product.id) },
+                    onLongPress = {
+                        if (!selectionMode) selectionMode = true
+                        toggle(product.id)
+                    }
+                )
                 HorizontalDivider(color = FanLensColors.Rule)
             }
         }
       }
 
+      if (!selectionMode) {
         HorizontalDivider(color = FanLensColors.Rule)
         Row(
             modifier = Modifier
@@ -839,14 +918,47 @@ private fun EeProductCatalogue(
                 Text("Add product", fontWeight = FontWeight.Bold)
             }
         }
+      }
     }
 }
 
+/** Contextual bar shown in place of the usual list header while selecting. */
+@Composable
+private fun EeSelectionBar(count: Int, onCancel: () -> Unit, onDeleteSelected: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(FanLensColors.PaperRaised)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TextButton(onClick = onCancel) {
+            Text("Cancel", color = FanLensColors.Ink)
+        }
+        Spacer(Modifier.weight(1f))
+        Button(
+            onClick = onDeleteSelected,
+            enabled = count > 0,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.error,
+                contentColor = Color.White
+            )
+        ) {
+            Text("Delete selected ($count)", fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun EeProductRow(
     product: Product,
     repository: CatalogRepository,
-    onSelect: (Product) -> Unit
+    selectionMode: Boolean,
+    selected: Boolean,
+    onSelect: (Product) -> Unit,
+    onToggleSelected: () -> Unit,
+    onLongPress: () -> Unit
 ) {
     val thumbnail by produceState<java.io.File?>(initialValue = null, product.id, product.updatedAt) {
         value = repository.coverThumb(product.id)
@@ -855,10 +967,22 @@ private fun EeProductRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onSelect(product) }
-            .padding(vertical = 12.dp),
+            .background(if (selected) FanLensColors.BrandRed.copy(alpha = 0.08f) else Color.Transparent)
+            .combinedClickable(
+                onClick = { if (selectionMode) onToggleSelected() else onSelect(product) },
+                onLongClick = onLongPress
+            )
+            .padding(horizontal = 4.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (selectionMode) {
+            Checkbox(
+                checked = selected,
+                onCheckedChange = { onToggleSelected() },
+                colors = CheckboxDefaults.colors(checkedColor = FanLensColors.BrandRed)
+            )
+            Spacer(Modifier.width(6.dp))
+        }
         val thumb = thumbnail
         if (thumb != null) {
             AsyncImage(
@@ -892,12 +1016,14 @@ private fun EeProductRow(
                 color = FanLensColors.InkMuted
             )
         }
-        Text(
-            text = "View",
-            style = MaterialTheme.typography.labelMedium,
-            color = FanLensColors.BrandRed,
-            fontWeight = FontWeight.Bold
-        )
+        if (!selectionMode) {
+            Text(
+                text = "View",
+                style = MaterialTheme.typography.labelMedium,
+                color = FanLensColors.BrandRed,
+                fontWeight = FontWeight.Bold
+            )
+        }
     }
 }
 
