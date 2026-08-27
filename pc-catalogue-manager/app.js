@@ -570,7 +570,7 @@ async function removeCurrentProduct() {
   showEditor(false);
   await renderList();
   toast('Product deleted');
-  if (isSignedIn()) cloudDeleteProduct(p.id);
+  if (isSignedIn()) cloudDeleteProduct(p);
 }
 
 /* ---------- import / export ---------- */

@@ -12,6 +12,7 @@ import com.fanlens.prototype.model.ProductSource
 import org.json.JSONObject
 import java.math.BigDecimal
 import java.time.Instant
+import java.util.UUID
 
 /**
  * Pushes and pulls the whole catalogue against Supabase, so the PC and the
@@ -25,6 +26,14 @@ import java.time.Instant
  * existing "Sync with the PC" pattern. .eelens export/import remains the
  * full-fidelity, no-internet-required backup; this is a lighter cloud
  * mirror on top of it, so slug/mrp/currency/source stay local-only.
+ *
+ * Not every local id is a UUID: the bundled demo catalogue
+ * (BundledProductCatalog) seeds fixed slugs like "havells-enticer-vineer",
+ * which the uuid-typed client_id column rejects outright ("invalid input
+ * syntax for type uuid"). For a row like that, a UUID is generated once,
+ * sent as client_id, and written back onto the local row as cloudClientId --
+ * so every later push and pull agrees on the same cloud identity instead of
+ * minting a new one (and a new duplicate remote row) every time.
  */
 class CloudSyncManager(
     private val database: EeDatabase,
@@ -84,7 +93,8 @@ class CloudSyncManager(
     // ---------------- push ----------------
 
     private suspend fun pushProduct(accessToken: String, product: ProductEntity) {
-        val body = productToRemoteJson(product)
+        val clientId = resolveProductClientId(product)
+        val body = productToRemoteJson(product, clientId)
         val saved = sync.upsertProduct(accessToken, body)
         if (product.deletedAt != null) return // a deleted product has nothing else worth syncing
 
@@ -92,12 +102,13 @@ class CloudSyncManager(
         val photos = database.photoDao().forProduct(product.id)
         val remotePhotoIdByLocalId = mutableMapOf<String, Long>()
         for (photo in photos) {
+            val photoClientId = resolvePhotoClientId(photo)
             if (photo.syncedAt == null) {
                 val bytes = photoStore.fullFile(product.id, photo.id).readBytes()
                 sync.uploadPhoto(accessToken, product.id, photo.id, bytes)
             }
             val photoBody = JSONObject()
-                .put("client_id", photo.id)
+                .put("client_id", photoClientId)
                 .put("product_id", remoteId)
                 .put("role", localRoleToCloud(photo.role))
                 .put("storage_path", SupabaseSyncClient.photoStoragePath(product.id, photo.id))
@@ -115,8 +126,31 @@ class CloudSyncManager(
         }
     }
 
-    private fun productToRemoteJson(product: ProductEntity): JSONObject = JSONObject().apply {
-        put("client_id", product.id)
+    /** Resolves this product's client_id, persisting a freshly generated one so it is stable next time. */
+    private suspend fun resolveProductClientId(product: ProductEntity): String {
+        if (isValidUuid(product.id)) return product.id
+        product.cloudClientId?.takeIf { isValidUuid(it) }?.let { return it }
+        val generated = UUID.randomUUID().toString()
+        database.productDao().setCloudClientId(product.id, generated)
+        return generated
+    }
+
+    /**
+     * Resolves this photo's client_id, persisting a freshly generated one
+     * immediately (not batched) so a push that fails partway through a
+     * product's photos does not mint a different id -- and a duplicate
+     * remote row -- for the same photo on retry.
+     */
+    private suspend fun resolvePhotoClientId(photo: PhotoEntity): String {
+        if (isValidUuid(photo.id)) return photo.id
+        photo.cloudClientId?.takeIf { isValidUuid(it) }?.let { return it }
+        val generated = UUID.randomUUID().toString()
+        database.photoDao().setCloudClientId(photo.id, generated)
+        return generated
+    }
+
+    private fun productToRemoteJson(product: ProductEntity, clientId: String): JSONObject = JSONObject().apply {
+        put("client_id", clientId)
         put("brand", product.brand)
         put("name", product.name)
         put("model", if (product.model.isBlank()) JSONObject.NULL else product.model)
@@ -134,11 +168,15 @@ class CloudSyncManager(
     // ---------------- pull ----------------
 
     private suspend fun pullProduct(token: String?, row: JSONObject, clientId: String) {
-        val local = database.productDao().byId(clientId)
+        // A legacy-id product's client_id is a generated cloudClientId, not
+        // its real id -- match on both, and never rename its local row to
+        // the cloud's UUID underneath the owner.
+        val local = database.productDao().byId(clientId) ?: database.productDao().byCloudClientId(clientId)
+        val localId = local?.id ?: clientId
 
         if (!row.isNull("deleted_at") && row.optString("deleted_at").isNotBlank()) {
             if (local != null && local.deletedAt == null) {
-                database.productDao().softDelete(clientId, fromIso(row.optString("deleted_at")))
+                database.productDao().softDelete(localId, fromIso(row.optString("deleted_at")))
             }
             return
         }
@@ -148,7 +186,14 @@ class CloudSyncManager(
 
         val remoteId = row.getLong("id")
         val remotePhotos = sync.fetchPhotosForProduct(token, remoteId)
-        val existingPhotoIds = database.photoDao().forProduct(clientId).map { it.id }.toSet()
+        // Same idea for photos: a legacy-id photo's client_id (its
+        // cloudClientId) does not equal its local id, so map through both to
+        // find what is already here -- and to resolve the cover photo below.
+        val localPhotoIdByCloudId = mutableMapOf<String, String>()
+        database.photoDao().forProduct(localId).forEach { p ->
+            localPhotoIdByCloudId[p.id] = p.id
+            p.cloudClientId?.let { localPhotoIdByCloudId[it] = p.id }
+        }
 
         var coverPhotoId = local?.coverPhotoId
         val now = System.currentTimeMillis()
@@ -160,13 +205,13 @@ class CloudSyncManager(
                 val photoClientId = prow.optString("client_id").takeIf { it.isNotBlank() } ?: continue
                 val remotePhotoId = prow.getLong("id")
 
-                if (!existingPhotoIds.contains(photoClientId)) {
-                    val bytes = sync.downloadPhoto(clientId, photoClientId)
-                    val stored = photoStore.writeRaw(clientId, photoClientId, bytes)
+                if (!localPhotoIdByCloudId.containsKey(photoClientId)) {
+                    val bytes = sync.downloadPhoto(prow.getString("storage_path"))
+                    val stored = photoStore.writeRaw(localId, photoClientId, bytes)
                     writtenFiles += photoClientId
                     newPhotos += PhotoEntity(
                         id = photoClientId,
-                        productId = clientId,
+                        productId = localId,
                         fileName = stored.fileName,
                         sha256 = stored.sha256,
                         width = stored.width,
@@ -179,16 +224,20 @@ class CloudSyncManager(
                         // Just downloaded from the cloud, so its bytes are already in sync.
                         syncedAt = now
                     )
+                    // A brand new local photo adopts the cloud's id directly --
+                    // map it to itself so a cover-photo match below still resolves.
+                    localPhotoIdByCloudId[photoClientId] = photoClientId
                 }
                 if (!row.isNull("cover_photo_id") && row.optLong("cover_photo_id") == remotePhotoId) {
-                    coverPhotoId = photoClientId
+                    coverPhotoId = localPhotoIdByCloudId[photoClientId]
                 }
             }
 
             val entity = ProductEntity(
-                id = clientId,
+                id = localId,
+                cloudClientId = local?.cloudClientId,
                 slug = local?.slug?.takeIf { it.isNotBlank() }
-                    ?: CatalogRepository.slugify(row.optString("brand"), row.optString("name"), clientId),
+                    ?: CatalogRepository.slugify(row.optString("brand"), row.optString("name"), localId),
                 brand = row.optString("brand"),
                 name = row.optString("name"),
                 model = row.optString("model"),
@@ -213,12 +262,18 @@ class CloudSyncManager(
                 newPhotos.forEach { database.photoDao().insert(it) }
             }
         } catch (error: Throwable) {
-            writtenFiles.forEach { photoStore.delete(clientId, it) }
+            writtenFiles.forEach { photoStore.delete(localId, it) }
             throw error
         }
     }
 
     companion object {
+        private val UUID_REGEX = Regex(
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        )
+
+        private fun isValidUuid(value: String): Boolean = UUID_REGEX.matches(value)
+
         private fun localRoleToCloud(role: String): String =
             if (role == PhotoRole.Display.storageValue()) "catalogue" else "shop"
 

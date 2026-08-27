@@ -20,6 +20,13 @@ interface ProductDao {
     @Query("SELECT * FROM products WHERE id = :id")
     suspend fun byId(id: String): ProductEntity?
 
+    /** For a legacy-id product whose local id is not the cloud's client_id -- see ProductEntity.cloudClientId. */
+    @Query("SELECT * FROM products WHERE cloud_client_id = :cloudClientId")
+    suspend fun byCloudClientId(cloudClientId: String): ProductEntity?
+
+    @Query("UPDATE products SET cloud_client_id = :cloudClientId WHERE id = :id")
+    suspend fun setCloudClientId(id: String, cloudClientId: String)
+
     /** Includes soft-deleted rows: a product the owner deleted must not be re-seeded. */
     @Query("SELECT id FROM products")
     suspend fun allIdsIncludingDeleted(): List<String>
