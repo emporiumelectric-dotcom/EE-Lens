@@ -277,6 +277,13 @@ fun ElectricEmporiumScreen(
                         onRefresh = {
                             refreshingCatalogue = true
                             scope.launch {
+                                // Same pull logic "Pull from cloud" used to trigger, just started
+                                // by the gesture instead of a button. Failure (most likely no
+                                // signal) is silent here, same as the local refresh below always
+                                // was -- whatever is already on this phone is unaffected either way.
+                                runCatching {
+                                    withContext(Dispatchers.IO) { repository.cloudPullAll() }
+                                }
                                 runCatching {
                                     withContext(Dispatchers.Default) { recognitionEngine.refresh() }
                                 }

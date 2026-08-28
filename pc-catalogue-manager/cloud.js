@@ -4,14 +4,20 @@
  * and the Android app can both read and write the same catalogue without
  * passing a .eelens file back and forth by hand.
  *
- * This is a manual, pull-based sync -- "Push to cloud" and "Pull from cloud"
- * -- deliberately mirroring the existing Phone-sync UX rather than pushing on
- * every keystroke. The .eelens export/import remains the full-fidelity,
+ * This sync is automatic, not a button someone has to remember to press:
+ * every save or delete pushes that one product right away (cloudBackgroundPush
+ * / the delete call site in app.js), and every page load -- including a
+ * plain browser refresh -- pulls in the cloud's latest (see cloudAutoPull in
+ * app.js). The .eelens export/import remains the full-fidelity,
  * works-with-no-internet backup; this is a lighter cloud mirror on top of it.
  *
  * Reading is open to everyone (RLS: anon can SELECT); writing needs a signed-
  * in Supabase session (RLS: authenticated only), matching supabase.js's
- * existing sign-in gate.
+ * existing sign-in gate. Two devices editing the same product before either
+ * syncs is resolved last-write-wins, no merge, no prompt: cloudPullAll only
+ * ever takes a remote row that is newer than the local one, and
+ * cloudPushProduct (see pushWouldLoseToRemote) refuses to push over a remote
+ * row that is already newer than the local edit.
  *
  * Local <-> remote field mapping, because the live ee_lens schema is
  * narrower than the local one:
@@ -174,6 +180,18 @@ async function cloudDownloadPhoto(storagePath, headers) {
 }
 
 /**
+ * Last-write-wins, made explicit: true when a remote row already carries an
+ * updated_at at or after this device's local one, meaning a push would
+ * clobber a newer edit made elsewhere with a stale one from here. No merge,
+ * no prompt -- the loser's push is simply skipped; its own next pull brings
+ * the winning version back to it instead.
+ */
+function pushWouldLoseToRemote(remoteUpdatedAtIso, localUpdatedAtMs) {
+  if (!remoteUpdatedAtIso) return false; // never pushed before -- nothing to lose to
+  return new Date(remoteUpdatedAtIso).getTime() >= (localUpdatedAtMs || 0);
+}
+
+/**
  * Pushes one product and its photos. Product metadata is always upserted
  * (cheap); a photo's bytes are only re-uploaded when they have never been
  * pushed or have changed since -- the expensive part is skipped, not the
@@ -181,6 +199,17 @@ async function cloudDownloadPhoto(storagePath, headers) {
  */
 async function cloudPushProduct(product, headers) {
   const clientId = await resolveProductClientId(product);
+
+  // Checked before touching anything else: this push must never overwrite a
+  // remote edit newer than the one it is carrying (see pushWouldLoseToRemote).
+  const [existingRemote] = await cloudRest('GET', 'products', undefined, {
+    headers,
+    query: `client_id=eq.${clientId}&select=updated_at`
+  });
+  if (existingRemote && pushWouldLoseToRemote(existingRemote.updated_at, product.updatedAt)) {
+    return;
+  }
+
   const remoteProduct = {
     client_id: clientId,
     brand: product.brand || '',
@@ -277,7 +306,15 @@ async function cloudDeleteProduct(product) {
   }
 }
 
-/** Pushes every local product. Continues past a single product's failure. */
+/**
+ * Pushes every local product. Continues past a single product's failure.
+ *
+ * Nothing in the UI calls this any more -- an individual save or delete
+ * pushes itself, right away (cloudBackgroundPush / cloudDeleteProduct). This
+ * stays as a manual recovery tool: run `cloudPushAll()` from this page's
+ * browser console to push a catalogue that predates cloud sync, or to
+ * recover after the cloud side was reset.
+ */
 async function cloudPushAll(onProgress) {
   const headers = await cloudAuthHeaders(true);
   const all = await listProducts();

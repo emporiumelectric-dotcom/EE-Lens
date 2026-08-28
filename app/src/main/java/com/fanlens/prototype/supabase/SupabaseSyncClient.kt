@@ -44,6 +44,24 @@ class SupabaseSyncClient {
             body = body.toString()
         ).let { JSONArray(it).getJSONObject(0) }
 
+    /**
+     * This product's current remote updated_at, or null when it has never
+     * been pushed. Checked before a push so it can refuse to overwrite a
+     * remote edit newer than the one it is carrying -- see
+     * CloudSyncManager.pushProduct.
+     */
+    fun fetchRemoteUpdatedAt(accessToken: String?, clientId: String): String? {
+        val rows = JSONArray(
+            request(
+                method = "GET",
+                path = "/rest/v1/products",
+                query = "client_id=eq.$clientId&select=updated_at",
+                accessToken = accessToken
+            )
+        )
+        return if (rows.length() > 0) rows.getJSONObject(0).optString("updated_at").takeIf { it.isNotBlank() } else null
+    }
+
     /** Every live and soft-deleted product, oldest-updated first. */
     fun fetchAllProducts(accessToken: String?): JSONArray =
         JSONArray(

@@ -1202,6 +1202,9 @@ async function approveCandidate() {
 function updateAuthUI() {
   const btn = $('auth-btn');
   btn.textContent = isSignedIn() ? `Sign out (${session.email})` : 'Sign in';
+  // Keeps the Cloud sync panel's sign-in line correct even if it is left
+  // open across a sign-in or sign-out.
+  refreshCloudHints();
 }
 
 function openAuthModal() {
@@ -1335,34 +1338,40 @@ function cloudWhenLabel(ms) {
 }
 
 function refreshCloudHints() {
+  $('cloud-auth-status').textContent = isSignedIn() ? `Signed in as ${session.email}` : 'Not signed in';
   $('cloud-push-at').textContent = `Last pushed: ${cloudWhenLabel(cloudLastSyncAt('push'))}`;
   $('cloud-pull-at').textContent = `Last pulled: ${cloudWhenLabel(cloudLastSyncAt('pull'))}`;
 }
 
 function openCloudModal() {
   refreshCloudHints();
-  $('cloud-progress').hidden = true;
   $('cloud-modal').hidden = false;
 }
 
-async function runCloudSync(direction) {
+/**
+ * Runs the same pull logic the old "Pull from cloud" button used to trigger,
+ * automatically on every page load (a plain refresh included -- there is
+ * nothing special to detect, this file just runs again from the top). Never
+ * blocks the rest of startup and never throws; a failure is a toast, since
+ * whatever is already on this PC is unaffected either way.
+ */
+async function cloudAutoPull() {
   const progressEl = $('cloud-progress');
   progressEl.hidden = false;
-  const label = direction === 'push' ? 'Pushing' : 'Pulling';
-  progressEl.textContent = `${label}…`;
-  busy(true, `${label} the catalogue…`);
+  progressEl.textContent = 'Checking the cloud for updates…';
   try {
-    const summary = direction === 'push'
-      ? await cloudPushAll((done, total) => { progressEl.textContent = `${label} ${done} of ${total}…`; })
-      : await cloudPullAll((done, total) => { progressEl.textContent = `${label} ${done} of ${total}…`; });
-    const count = direction === 'push' ? summary.pushed : summary.pulled;
-    const failedNote = summary.failed ? ` · ${summary.failed} failed, see the browser console` : '';
-    toast(`${direction === 'push' ? 'Pushed' : 'Pulled'} ${count} of ${summary.total} products${failedNote}`, summary.failed > 0);
-    if (direction === 'pull') await renderList();
+    const summary = await cloudPullAll((done, total) => {
+      progressEl.textContent = `Checking the cloud for updates — ${done} of ${total}…`;
+    });
+    if (summary.failed) {
+      toast(`Pulled from the cloud, but ${summary.failed} product(s) failed — see the browser console`, true);
+    }
+    if (summary.pulled > 0) await renderList();
   } catch (error) {
-    toast(error.message || 'Cloud sync failed.', true);
+    console.error('Auto pull failed', error);
+    toast(`Could not check the cloud for updates: ${error.message}`, true);
   } finally {
-    busy(false);
+    progressEl.hidden = true;
     refreshCloudHints();
   }
 }
@@ -1473,8 +1482,6 @@ function wire() {
 
   $('cloud-btn').addEventListener('click', openCloudModal);
   $('cloud-close').addEventListener('click', () => { $('cloud-modal').hidden = true; });
-  $('cloud-push').addEventListener('click', () => runCloudSync('push'));
-  $('cloud-pull').addEventListener('click', () => runCloudSync('pull'));
   $('cloud-modal').addEventListener('click', (e) => {
     if (e.target === $('cloud-modal')) $('cloud-modal').hidden = true;
   });
@@ -1604,4 +1611,8 @@ function wire() {
   await renderList();
   showEditor(false);
   if (swept) toast(`Cleaned up ${swept} photos from an unsaved product`);
+  // Not awaited: every load (a plain refresh included) checks the cloud for
+  // updates on its own, but the rest of startup -- and the locally-saved
+  // catalogue already rendered above -- must never wait on the network for it.
+  cloudAutoPull();
 })();

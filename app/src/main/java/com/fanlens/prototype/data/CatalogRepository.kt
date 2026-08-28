@@ -1,6 +1,7 @@
 package com.fanlens.prototype.data
 
 import android.content.Context
+import android.util.Log
 import androidx.room.withTransaction
 import com.fanlens.prototype.data.db.EeDatabase
 import com.fanlens.prototype.data.db.entity.EmbeddingEntity
@@ -24,9 +25,15 @@ import com.fanlens.prototype.recognition.EmbeddingIndex
 import com.fanlens.prototype.recognition.IndexedFingerprint
 import com.fanlens.prototype.recognition.RecognitionPreprocessing
 import com.fanlens.prototype.recognition.VectorCodec
+import com.fanlens.prototype.supabase.CloudSyncManager
+import com.fanlens.prototype.supabase.SupabaseAuthClient
 import com.fanlens.prototype.util.Money
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.InputStream
 import java.util.UUID
@@ -60,6 +67,15 @@ class CatalogRepository(
 ) {
 
     private val seeder = CatalogSeeder(context, database, photoStore)
+
+    /**
+     * Shared with every screen that touches cloud sync (the Backup screen's
+     * sign-in/out, the Products list's pull-to-refresh, and the background
+     * push below), so there is exactly one Supabase session and one sync
+     * client per process instead of each screen building its own.
+     */
+    val cloudAuth = SupabaseAuthClient(database.metaDao())
+    private val cloudSync = CloudSyncManager(database, photoStore, cloudAuth)
 
     // ---------------- reads ----------------
 
@@ -245,12 +261,14 @@ class CatalogRepository(
         // Files for rows deleted above are only removed once the transaction has
         // committed, so a rollback cannot leave a row pointing at a missing file.
         removedPhotoIds.forEach { photoStore.delete(productId, it) }
+        database.productDao().byId(productId)?.let(::cloudBackgroundPush)
         return productId
     }
 
     /** Hides a product immediately; [purgeDeletedBefore] removes its files later. */
     suspend fun softDeleteProduct(productId: String) {
         database.productDao().softDelete(productId, System.currentTimeMillis())
+        database.productDao().byId(productId)?.let(::cloudBackgroundPush)
     }
 
     suspend fun restoreProduct(productId: String) {
@@ -474,7 +492,53 @@ class CatalogRepository(
         deletedAt = null
     )
 
+    // ---------------- cloud sync ----------------
+
+    /** Pushes every local product to the cloud. Needs a signed-in session. */
+    suspend fun cloudPushAll(onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }): CloudSyncManager.SyncSummary {
+        val summary = cloudSync.pushAll(onProgress)
+        database.metaDao().put(EeDatabase.KEY_CLOUD_LAST_PUSH_AT, System.currentTimeMillis().toString())
+        return summary
+    }
+
+    /**
+     * Pulls in the cloud's latest -- the same logic a "Pull from cloud"
+     * button used to trigger, now driven by swiping down to refresh the
+     * Products list. Works even signed out; reading is open to everyone.
+     */
+    suspend fun cloudPullAll(onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }): CloudSyncManager.SyncSummary {
+        val summary = cloudSync.pullAll(onProgress)
+        database.metaDao().put(EeDatabase.KEY_CLOUD_LAST_PULL_AT, System.currentTimeMillis().toString())
+        return summary
+    }
+
+    suspend fun cloudLastPushAt(): Long? = database.metaDao().value(EeDatabase.KEY_CLOUD_LAST_PUSH_AT)?.toLongOrNull()
+
+    suspend fun cloudLastPullAt(): Long? = database.metaDao().value(EeDatabase.KEY_CLOUD_LAST_PULL_AT)?.toLongOrNull()
+
+    /**
+     * Fire-and-forget push of one product to the cloud, for right after a
+     * local save or delete -- mirrors pc-catalogue-manager/app.js's
+     * cloudBackgroundPush. Never blocks the caller and never throws; the
+     * product is already safely saved locally either way. Silently does
+     * nothing when signed out.
+     */
+    @OptIn(DelicateCoroutinesApi::class)
+    private fun cloudBackgroundPush(product: ProductEntity) {
+        GlobalScope.launch(Dispatchers.IO) {
+            try {
+                if (cloudSync.pushOne(product)) {
+                    database.metaDao().put(EeDatabase.KEY_CLOUD_LAST_PUSH_AT, System.currentTimeMillis().toString())
+                }
+            } catch (error: Throwable) {
+                Log.e(TAG, "Cloud push failed for ${product.id}", error)
+            }
+        }
+    }
+
     companion object {
+        private const val TAG = "EeCatalogRepository"
+
         /** Guidance only; the owner is warned rather than blocked. */
         const val RECOMMENDED_MIN_PHOTOS = 6
         const val RECOMMENDED_MAX_PHOTOS = 10

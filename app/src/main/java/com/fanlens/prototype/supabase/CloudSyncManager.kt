@@ -22,10 +22,21 @@ import java.util.UUID
  * why the mapping looks the way it does (bigint identity ids vs local UUIDs,
  * paise vs decimal rupees, and so on).
  *
- * A manual, pull-based sync -- not realtime -- matching this screen's
- * existing "Sync with the PC" pattern. .eelens export/import remains the
- * full-fidelity, no-internet-required backup; this is a lighter cloud
- * mirror on top of it, so slug/mrp/currency/source stay local-only.
+ * Automatic, not a button someone has to remember to press: saving or
+ * deleting a product pushes it right away (CatalogRepository's
+ * cloudBackgroundPush, via pushOne below), and swiping down to refresh the
+ * Products list pulls in the cloud's latest (pullAll) -- what a manual
+ * "Pull from cloud" button used to trigger. Not realtime otherwise: there is
+ * no open connection or push notification, only these two triggers. .eelens
+ * export/import remains the full-fidelity, no-internet-required backup; this
+ * is a lighter cloud mirror on top of it, so slug/mrp/currency/source stay
+ * local-only.
+ *
+ * Two devices editing the same product before either syncs is resolved
+ * last-write-wins, no merge, no prompt: pullAll only ever takes a remote row
+ * that is newer than the local one, and pushProduct (see
+ * pushWouldLoseToRemote) refuses to push over a remote row that is already
+ * newer than the local edit.
  *
  * Not every local id is a UUID: the bundled demo catalogue
  * (BundledProductCatalog) seeds fixed slugs like "havells-enticer-vineer",
@@ -61,6 +72,20 @@ class CloudSyncManager(
         }
         onProgress(all.size, all.size)
         return SyncSummary(processed, failed, all.size)
+    }
+
+    /**
+     * Fire-and-forget-friendly single product push, for right after a local
+     * save or delete -- mirrors pc-catalogue-manager/cloud.js's
+     * cloudBackgroundPush. Silently does nothing and returns false when
+     * signed out, so a caller can tell "nothing to record" apart from "a
+     * push was attempted" (see pushWouldLoseToRemote for what "attempted"
+     * can still mean: last-write-wins may skip the actual upsert).
+     */
+    suspend fun pushOne(product: ProductEntity): Boolean {
+        val session = authClient.ensureFreshSession() ?: return false
+        pushProduct(session.accessToken, product)
+        return true
     }
 
     /**
@@ -101,6 +126,16 @@ class CloudSyncManager(
 
     private suspend fun pushProduct(accessToken: String, product: ProductEntity) {
         val clientId = resolveProductClientId(product)
+
+        // Last-write-wins, made explicit: never overwrite a remote edit made
+        // after this one. If the cloud row is already at least as new, this
+        // device's copy lost the race -- skip it silently; the next pull
+        // brings the winning version back here instead of a merge or a
+        // prompt. See pushWouldLoseToRemote (PC's equivalent) and
+        // PushConflictPolicyTest.
+        val remoteUpdatedAt = sync.fetchRemoteUpdatedAt(accessToken, clientId)
+        if (pushWouldLoseToRemote(remoteUpdatedAt?.let(::fromIso), product.updatedAt)) return
+
         val body = productToRemoteJson(product, clientId)
         val saved = sync.upsertProduct(accessToken, body)
         if (product.deletedAt != null) return // a deleted product has nothing else worth syncing
@@ -329,6 +364,20 @@ class CloudSyncManager(
             iso?.takeIf { it.isNotBlank() }?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
                 ?: System.currentTimeMillis()
     }
+}
+
+/**
+ * Last-write-wins, made explicit: true when a remote row already carries an
+ * updated_at at or after this device's local one, meaning a push would
+ * clobber a newer edit made elsewhere with a stale one from here. No merge,
+ * no prompt -- the loser's push is simply skipped; its own next pull brings
+ * the winning version back to it instead. Pure and dependency-free, mirrors
+ * pc-catalogue-manager/cloud.js's pushWouldLoseToRemote; see
+ * PushConflictPolicyTest.
+ */
+internal fun pushWouldLoseToRemote(remoteUpdatedAt: Long?, localUpdatedAt: Long): Boolean {
+    if (remoteUpdatedAt == null) return false // never pushed before -- nothing to lose to
+    return remoteUpdatedAt >= localUpdatedAt
 }
 
 /**

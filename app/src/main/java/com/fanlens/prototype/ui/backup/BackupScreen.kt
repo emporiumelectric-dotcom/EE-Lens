@@ -30,6 +30,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +52,11 @@ import com.fanlens.prototype.ui.FanLensColors
 @Composable
 fun BackupScreen(viewModel: BackupViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+
+    // Cloud sync can now happen from elsewhere -- a save anywhere, or a
+    // pull-to-refresh on the Products list -- so this status is re-read every
+    // time this screen is opened, not just once when the ViewModel was made.
+    LaunchedEffect(Unit) { viewModel.refreshCloudStatus() }
 
     val createFile = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument(EelensFormat.MIME)
@@ -208,8 +214,11 @@ fun BackupScreen(viewModel: BackupViewModel) {
         Spacer(Modifier.height(4.dp))
         Text(
             "Keeps this phone and the PC Catalogue Manager reading and writing the same " +
-                "products over the internet, instead of passing a catalogue file by hand. " +
-                "Pulling never needs a sign-in; pushing your changes does.",
+                "products over the internet, instead of passing a catalogue file by hand. It " +
+                "happens automatically: saving or deleting a product pushes it right away (once " +
+                "signed in), and swiping down to refresh the Products list -- or just opening " +
+                "the app -- pulls in anything changed elsewhere. If the same product was edited " +
+                "on two devices before either synced, whichever edit is newer wins once they do.",
             style = MaterialTheme.typography.bodySmall,
             color = FanLensColors.InkMuted
         )
@@ -226,24 +235,6 @@ fun BackupScreen(viewModel: BackupViewModel) {
         )
         Spacer(Modifier.height(12.dp))
 
-        Row(Modifier.fillMaxWidth()) {
-            Button(
-                onClick = viewModel::cloudPush,
-                enabled = !state.cloudBusy,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = FanLensColors.BrandRed,
-                    contentColor = FanLensColors.Paper
-                )
-            ) { Text("Push to cloud", fontWeight = FontWeight.Bold) }
-            Spacer(Modifier.width(10.dp))
-            OutlinedButton(
-                onClick = viewModel::cloudPull,
-                enabled = !state.cloudBusy,
-                modifier = Modifier.weight(1f)
-            ) { Text("Pull from cloud") }
-        }
-        Spacer(Modifier.height(8.dp))
         TextButton(onClick = { if (state.cloudSignedIn) viewModel.cloudSignOut() else viewModel.openCloudSignIn() }) {
             Text(if (state.cloudSignedIn) "Sign out of the cloud" else "Sign in to push changes")
         }
