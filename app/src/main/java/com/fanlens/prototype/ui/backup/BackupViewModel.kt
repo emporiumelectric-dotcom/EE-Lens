@@ -8,16 +8,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.fanlens.prototype.data.CatalogRepository
-import com.fanlens.prototype.data.EeGraph
-import com.fanlens.prototype.data.db.EeDatabase
 import com.fanlens.prototype.eelens.EelensException
 import com.fanlens.prototype.eelens.EelensReader
 import com.fanlens.prototype.eelens.EelensSyncClient
 import com.fanlens.prototype.eelens.ImportConflictPolicy
 import com.fanlens.prototype.eelens.ImportPreview
 import com.fanlens.prototype.eelens.StagedPackage
-import com.fanlens.prototype.supabase.CloudSyncManager
-import com.fanlens.prototype.supabase.SupabaseAuthClient
 import com.fanlens.prototype.update.UpdateChecker
 import com.fanlens.prototype.update.UpdateInfo
 import com.fanlens.prototype.update.UpdateInstaller
@@ -84,9 +80,8 @@ class BackupViewModel(
 
     private val sync = EelensSyncClient()
 
-    private val database = EeGraph.database(context)
-    private val cloudAuth = SupabaseAuthClient(database.metaDao())
-    private val cloudSync = CloudSyncManager(database, repository.photoStore, cloudAuth)
+    /** The one shared client every screen's cloud sync goes through -- see its own doc comment. */
+    private val cloudAuth = repository.cloudAuth
 
     init {
         refreshCounts()
@@ -95,12 +90,7 @@ class BackupViewModel(
                 it.copy(syncAddress = repository.syncAddress(), syncCode = repository.syncCode())
             }
         }
-        viewModelScope.launch {
-            val email = cloudAuth.currentSession()?.email
-            val lastPush = database.metaDao().value(EeDatabase.KEY_CLOUD_LAST_PUSH_AT)?.toLongOrNull()
-            val lastPull = database.metaDao().value(EeDatabase.KEY_CLOUD_LAST_PULL_AT)?.toLongOrNull()
-            _state.update { it.copy(cloudEmail = email, cloudLastPushAt = lastPush, cloudLastPullAt = lastPull) }
-        }
+        refreshCloudStatus()
     }
 
     fun setSyncAddress(value: String) = _state.update { it.copy(syncAddress = value) }
@@ -307,6 +297,21 @@ class BackupViewModel(
 
     /* ---------- cloud sync ---------- */
 
+    /**
+     * Re-reads sign-in state and the last-synced timestamps. Called on init,
+     * and again whenever this screen becomes visible (a push or pull can
+     * happen from elsewhere now -- a save anywhere, or a pull-to-refresh on
+     * the Products list -- so this status must not go stale while unseen).
+     */
+    fun refreshCloudStatus() {
+        viewModelScope.launch {
+            val email = cloudAuth.currentSession()?.email
+            val lastPush = repository.cloudLastPushAt()
+            val lastPull = repository.cloudLastPullAt()
+            _state.update { it.copy(cloudEmail = email, cloudLastPushAt = lastPush, cloudLastPullAt = lastPull) }
+        }
+    }
+
     fun setCloudSignInEmail(value: String) = _state.update { it.copy(cloudSignInEmail = value) }
 
     fun setCloudSignInPassword(value: String) = _state.update { it.copy(cloudSignInPassword = value) }
@@ -349,68 +354,6 @@ class BackupViewModel(
             withContext(Dispatchers.IO) { cloudAuth.signOut() }
             _state.update {
                 it.copy(cloudBusy = false, cloudEmail = null, cloudMessage = "Signed out", cloudMessageIsProblem = false)
-            }
-        }
-    }
-
-    /** Pushes every product on this phone to the cloud. Needs a signed-in session. */
-    fun cloudPush() {
-        if (!_state.value.cloudSignedIn) { openCloudSignIn(); return }
-        _state.update { it.copy(cloudBusy = true, cloudBusyMessage = "Pushing to the cloud…", cloudMessage = null) }
-        viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    cloudSync.pushAll { done, total ->
-                        _state.update { it.copy(cloudBusyMessage = "Pushing to the cloud — $done of $total") }
-                    }
-                }
-            }.onSuccess { summary ->
-                val now = System.currentTimeMillis()
-                database.metaDao().put(EeDatabase.KEY_CLOUD_LAST_PUSH_AT, now.toString())
-                val failedNote = if (summary.failed > 0) " · ${summary.failed} failed" else ""
-                _state.update {
-                    it.copy(
-                        cloudBusy = false, cloudLastPushAt = now, cloudMessageIsProblem = summary.failed > 0,
-                        cloudMessage = "Pushed ${summary.processed} of ${summary.total} products$failedNote."
-                    )
-                }
-            }.onFailure { error ->
-                Log.e(TAG, "Cloud push failed", error)
-                _state.update {
-                    it.copy(cloudBusy = false, cloudMessageIsProblem = true, cloudMessage = error.message ?: "The cloud push failed.")
-                }
-            }
-        }
-    }
-
-    /** Pulls in changes from the cloud. Works even signed out -- reading is open to everyone. */
-    fun cloudPull() {
-        _state.update { it.copy(cloudBusy = true, cloudBusyMessage = "Pulling from the cloud…", cloudMessage = null) }
-        viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    cloudSync.pullAll { done, total ->
-                        _state.update { it.copy(cloudBusyMessage = "Pulling from the cloud — $done of $total") }
-                    }
-                }
-            }.onSuccess { summary ->
-                val now = System.currentTimeMillis()
-                database.metaDao().put(EeDatabase.KEY_CLOUD_LAST_PULL_AT, now.toString())
-                refreshCounts()
-                onCatalogueChanged()
-                val failedNote = if (summary.failed > 0) " · ${summary.failed} failed" else ""
-                _state.update {
-                    it.copy(
-                        cloudBusy = false, cloudLastPullAt = now, cloudMessageIsProblem = summary.failed > 0,
-                        cloudMessage = "Pulled ${summary.processed} of ${summary.total} products$failedNote. " +
-                            "Recognition is preparing any new photos now."
-                    )
-                }
-            }.onFailure { error ->
-                Log.e(TAG, "Cloud pull failed", error)
-                _state.update {
-                    it.copy(cloudBusy = false, cloudMessageIsProblem = true, cloudMessage = error.message ?: "The cloud pull failed.")
-                }
             }
         }
     }

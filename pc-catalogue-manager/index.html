@@ -296,20 +296,15 @@
     <div class="modal-body">
       <p class="modal-note">
         Syncs this catalogue with Electric Emporium's Supabase project, so the PC and the
-        phone both see the same products without passing a .eelens file by hand. Reading is
-        always open; pushing changes needs you signed in.
+        phone both see the same products without passing a .eelens file by hand. It happens
+        automatically: saving or deleting a product pushes it right away, and every time this
+        page loads (a plain refresh included) it checks the cloud for anything added or changed
+        elsewhere. If the same product was edited on two devices before either synced, whichever
+        edit is newer wins once they do.
       </p>
-
-      <h3 class="preview-h">Send your changes to the cloud</h3>
-      <p class="modal-note">Pushes every product and photo here that the cloud does not already have.</p>
-      <button id="cloud-push" class="btn solid" type="button">Push to cloud</button>
+      <p class="hint" id="cloud-auth-status"></p>
       <p class="hint" id="cloud-push-at"></p>
-
-      <h3 class="preview-h">Bring in the cloud's changes</h3>
-      <p class="modal-note">Pulls in anything added or changed elsewhere (the phone, or another PC).</p>
-      <button id="cloud-pull" class="btn ghost" type="button">Pull from cloud</button>
       <p class="hint" id="cloud-pull-at"></p>
-
       <p id="cloud-progress" class="hint" hidden></p>
     </div>
   </div>
