@@ -59,4 +59,33 @@ class MatchPolicyTest {
     fun anAmbiguousCatalogueMatchIsStillRefused() {
         assertFalse(MatchPolicy.acceptCatalogue(.90f, .899f))
     }
+
+    @Test
+    fun aLowConfidenceClosestGuessIsNotShown() {
+        // The reported bug: a 14% "closest" guess reads as a match to anyone
+        // glancing at the screen even though it is closer to random than real.
+        assertFalse(MatchPolicy.shouldShowClosest(.14f))
+        assertFalse(MatchPolicy.shouldShowClosest(0f))
+    }
+
+    @Test
+    fun aReasonablyCloseGuessIsStillShown() {
+        // A near-miss that just failed the lead check, or a shop-level score
+        // that didn't clear the catalogue bar, is still worth surfacing.
+        assertTrue(MatchPolicy.shouldShowClosest(.50f))
+        assertTrue(MatchPolicy.shouldShowClosest(.80f))
+    }
+
+    @Test
+    fun theClosestDisplayThresholdIsWhatShipped() {
+        assertEquals(.50f, MatchPolicy.CLOSEST_DISPLAY_THRESHOLD, 0f)
+    }
+
+    @Test
+    fun theClosestThresholdSitsBelowBothAcceptanceBars() {
+        // It only ever gates the fallback shown when neither bar was cleared,
+        // so it must never be stricter than either real acceptance threshold.
+        assertTrue(MatchPolicy.CLOSEST_DISPLAY_THRESHOLD < MatchPolicy.SHOP_MINIMUM_SIMILARITY)
+        assertTrue(MatchPolicy.CLOSEST_DISPLAY_THRESHOLD < MatchPolicy.CATALOGUE_MINIMUM_SIMILARITY)
+    }
 }

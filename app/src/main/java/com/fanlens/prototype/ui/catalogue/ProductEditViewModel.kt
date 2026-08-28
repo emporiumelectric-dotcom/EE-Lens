@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.fanlens.prototype.data.AddPhotoOutcome
 import com.fanlens.prototype.data.CatalogRepository
 import com.fanlens.prototype.data.PendingPhoto
+import com.fanlens.prototype.model.CategoryTaxonomy
 import com.fanlens.prototype.model.DraftErrors
 import com.fanlens.prototype.model.DraftValidator
 import com.fanlens.prototype.model.Photo
@@ -38,6 +39,8 @@ class ProductEditViewModel(private val repository: CatalogRepository) : ViewMode
         val removedPhotoIds: Set<String> = emptySet(),
         val roleOverrides: Map<String, PhotoRole> = emptyMap(),
         val coverSelection: String? = null,
+        /** Categories already used by other products, so an old free-typed one never disappears from the picker. */
+        val usedCategories: List<String> = emptyList(),
         val saving: Boolean = false,
         val savedProductId: String? = null,
         val message: String? = null
@@ -88,8 +91,15 @@ class ProductEditViewModel(private val repository: CatalogRepository) : ViewMode
     fun start(productId: String?) {
         _state.value = UiState(loading = true)
         viewModelScope.launch {
+            // Categories already in use never disappear from the picker just
+            // because they aren't in the standard list, e.g. something typed
+            // before this screen had a dropdown at all.
+            val usedCategories = repository.products()
+                .mapNotNull { it.category?.trim()?.takeIf(String::isNotEmpty) }
+                .distinct()
+
             if (productId == null) {
-                _state.value = UiState(loading = false, draft = ProductDraft())
+                _state.value = UiState(loading = false, draft = ProductDraft(), usedCategories = usedCategories)
                 return@launch
             }
             val loaded = repository.productWithPhotos(productId)
@@ -100,7 +110,8 @@ class ProductEditViewModel(private val repository: CatalogRepository) : ViewMode
                     loading = false,
                     draft = ProductDraft.from(loaded.product),
                     existingPhotos = loaded.photos,
-                    coverSelection = loaded.product.coverPhotoId
+                    coverSelection = loaded.product.coverPhotoId,
+                    usedCategories = usedCategories
                 )
             }
         }
@@ -121,6 +132,26 @@ class ProductEditViewModel(private val repository: CatalogRepository) : ViewMode
 
     fun removeSpecRow(index: Int) = edit { draft ->
         draft.copy(specs = draft.specs.toMutableList().also { it.removeAt(index) })
+    }
+
+    /**
+     * Adds this category's usual fields as blank spec rows, mirroring
+     * pc-catalogue-manager/app.js's "Add usual … fields" button. Never
+     * touches a key the owner already has a row for, and skips Sweep or
+     * Wattage when this category already gets its own dedicated field for
+     * that -- one field for it beats two.
+     */
+    fun applySuggestedSpecs() = edit { draft ->
+        val template = CategoryTaxonomy.templateFor(draft.category) ?: return@edit draft
+        val dedicated = buildSet {
+            if (CategoryTaxonomy.hasSizeField(draft.category)) add("sweep")
+            if (CategoryTaxonomy.hasWattageField(draft.category)) add("wattage")
+        }
+        val existingKeys = draft.specs.map { it.key.trim().lowercase() }.toSet()
+        val additions = template
+            .filter { key -> key.trim().lowercase().let { it !in existingKeys && it !in dedicated } }
+            .map { SpecRow(key = it) }
+        if (additions.isEmpty()) draft else draft.copy(specs = draft.specs + additions)
     }
 
     /**

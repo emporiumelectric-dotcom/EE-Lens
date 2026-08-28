@@ -58,6 +58,39 @@ class DraftValidatorTest {
     }
 
     @Test
+    fun theWattageFieldFoldsIntoSpecsOnlyWhenTyped() {
+        val withWattage = valid.copy(wattage = " 800 ")
+        assertEquals("800", withWattage.specsMap()["Wattage"])
+
+        val blankWattage = valid.copy(
+            wattage = "",
+            specs = listOf(SpecRow("Wattage", "600"))
+        )
+        // A blank dedicated field never erases a Wattage value entered as its
+        // own spec row -- that row's own removal is what clears it.
+        assertEquals("600", blankWattage.specsMap()["Wattage"])
+    }
+
+    @Test
+    fun theDedicatedWattageFieldWinsOverAStaleSpecRow() {
+        val draft = valid.copy(
+            wattage = "1200",
+            specs = listOf(SpecRow("Wattage", "600"))
+        )
+        assertEquals("1200", draft.specsMap()["Wattage"])
+    }
+
+    @Test
+    fun editingAnExistingProductRoundTripsItsWattage() {
+        val product = Product(
+            id = "x", name = "N", model = "M", description = "D",
+            specs = mapOf("Wattage" to "750")
+        )
+        assertEquals("750", ProductDraft.from(product).wattage)
+        assertEquals("", ProductDraft.from(product.copy(specs = emptyMap())).wattage)
+    }
+
+    @Test
     fun editingAnExistingProductRoundTripsItsPrice() {
         val product = Product(
             id = "x", name = "N", model = "M", description = "D",

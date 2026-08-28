@@ -262,7 +262,15 @@ function newProduct() {
   current = { product: blankProduct(), photos: [] };
   fillForm();
   showEditor(true);
+  clearListSelection();
   $('f-brand').focus();
+}
+
+/** Nothing is being edited, so nothing in the list should look selected. */
+function clearListSelection() {
+  $('product-list').querySelectorAll('li[aria-selected="true"]').forEach((li) => {
+    li.setAttribute('aria-selected', 'false');
+  });
 }
 
 function fillForm() {
@@ -538,7 +546,6 @@ async function saveProduct() {
     ($('f-brand').value ? $('f-name') : $('f-brand')).focus();
     return;
   }
-  const wasNew = !products.some((x) => x.id === p.id);
   p.slug = p.slug || slugify(p.brand, p.name, p.id);
   p.updatedAt = Date.now();
   p.coverPhotoId = effectiveCover();
@@ -549,18 +556,14 @@ async function saveProduct() {
   await renderList();
   cloudBackgroundPush(p);
 
-  if (wasNew) {
-    // Entering a catalogue means one product after another, so a saved new
-    // product clears the form ready for the next. It is safely in the list on
-    // the left — briefly highlighted, so it is obvious where it went.
-    const saved = `${p.brand} ${p.name}`.trim();
-    newProduct();
-    flashInList(p.id);
-    toast(`Saved ${saved} — it is in the list on the left. Form ready for the next one.`);
-  } else {
-    fillForm();
-    toast('Product saved');
-  }
+  // Entering or updating a catalogue means one product after another, so a
+  // save always clears the form ready for the next, whether this product was
+  // new or an edit. It is safely in the list on the left — briefly
+  // highlighted, so it is obvious where it went.
+  const saved = `${p.brand} ${p.name}`.trim();
+  newProduct();
+  flashInList(p.id);
+  toast(`Saved ${saved} — it is in the list on the left. Form ready for the next one.`);
 }
 
 /** Points at a row in the list so a just-saved product is easy to find. */

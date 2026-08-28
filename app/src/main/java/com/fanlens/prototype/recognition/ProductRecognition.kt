@@ -169,10 +169,16 @@ class OnDeviceProductRecognitionEngine(
             }
         }
 
-        // Report whichever index came closest, so the owner can see why nothing matched.
+        // Report whichever index came closest, so the owner can see why nothing
+        // matched -- but only when that guess is close enough to be worth
+        // showing. Below MatchPolicy.CLOSEST_DISPLAY_THRESHOLD it reads as a
+        // find when it is really noise (e.g. "Atomberg Aris Contour Smart
+        // 14%" for a product that isn't even in frame).
         val closest = listOfNotNull(shopBest, catalogueBest).maxByOrNull { it.score }
         val closestProduct = closest?.let { productsById[it.productId] }
-            ?: return RecognitionResult(null, "Aim at one product")
+        if (closestProduct == null || !MatchPolicy.shouldShowClosest(closest.score)) {
+            return RecognitionResult(null, "Aim at one product")
+        }
 
         return RecognitionResult(
             null,
@@ -225,9 +231,21 @@ internal object MatchPolicy {
 
     private const val MINIMUM_LEAD = .003f
 
+    /**
+     * The "Closest: <product> <percent>" line shown while scanning finds
+     * nothing acceptable is only useful above this. Below it, the guess is
+     * little better than random and reads as a match to someone glancing at
+     * the screen -- better to say nothing was found. Tune this one constant
+     * to raise or lower how confident a near-miss must be before it is shown
+     * at all; it has no effect on acceptShop/acceptCatalogue above.
+     */
+    const val CLOSEST_DISPLAY_THRESHOLD = .50f
+
     fun acceptShop(best: Float, runnerUp: Float): Boolean =
         best >= SHOP_MINIMUM_SIMILARITY && best - runnerUp >= MINIMUM_LEAD
 
     fun acceptCatalogue(best: Float, runnerUp: Float): Boolean =
         best >= CATALOGUE_MINIMUM_SIMILARITY && best - runnerUp >= MINIMUM_LEAD
+
+    fun shouldShowClosest(score: Float): Boolean = score >= CLOSEST_DISPLAY_THRESHOLD
 }

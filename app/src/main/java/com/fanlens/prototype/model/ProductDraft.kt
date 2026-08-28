@@ -18,6 +18,8 @@ data class ProductDraft(
     val category: String = "",
     val colour: String = "",
     val sizeSweep: String = "",
+    /** Folded into specs["Wattage"] at save time; blank leaves any existing value alone. */
+    val wattage: String = "",
     /** What the shop charges. */
     val priceText: String = "",
     /** List price it is discounted from; blank when the shop sells at MRP. */
@@ -31,9 +33,19 @@ data class ProductDraft(
     val discountPercent: Int?
         get() = Money.discountPercent(Money.parseToMinor(mrpText), Money.parseToMinor(priceText))
 
-    fun specsMap(): Map<String, String> = specs
-        .filter { it.key.isNotBlank() }
-        .associate { it.key.trim() to it.value.trim() }
+    /**
+     * The dedicated Wattage field folds into the same "Wattage" key a spec row
+     * could also set -- mirrors pc-catalogue-manager/app.js's applyWattageField.
+     * Only ever set when the owner typed something here; leaving it blank
+     * never erases a Wattage value entered as its own spec row instead (that
+     * row's own removal is what clears it).
+     */
+    fun specsMap(): Map<String, String> {
+        val fromRows = specs
+            .filter { it.key.isNotBlank() }
+            .associate { it.key.trim() to it.value.trim() }
+        return if (wattage.isNotBlank()) fromRows + ("Wattage" to wattage.trim()) else fromRows
+    }
 
     companion object {
         private fun priceField(minor: Long?): String = minor?.let {
@@ -49,6 +61,7 @@ data class ProductDraft(
             category = product.category.orEmpty(),
             colour = product.colour.orEmpty(),
             sizeSweep = product.sizeSweepMm?.toString().orEmpty(),
+            wattage = product.specs["Wattage"].orEmpty(),
             priceText = priceField(product.priceMinor),
             mrpText = priceField(product.mrpMinor),
             description = product.description,

@@ -28,9 +28,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenu
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -56,6 +61,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.fanlens.prototype.data.CatalogRepository
+import com.fanlens.prototype.model.CategoryTaxonomy
 import com.fanlens.prototype.model.PhotoOrigin
 import com.fanlens.prototype.model.PhotoRole
 import com.fanlens.prototype.model.SpecRow
@@ -213,6 +219,18 @@ fun ProductEditScreen(
 
             item {
                 SectionLabel("Details")
+                Text(
+                    text = "Pick a category first — it decides which fields show up below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = FanLensColors.InkMuted
+                )
+                Spacer(Modifier.height(6.dp))
+                CategoryField(
+                    draftId = state.draft.id,
+                    category = state.draft.category,
+                    usedCategories = state.usedCategories,
+                    onChange = { new -> viewModel.edit { it.copy(category = new) } }
+                )
                 Field(
                     label = "Brand",
                     value = state.draft.brand,
@@ -231,22 +249,29 @@ fun ProductEditScreen(
                     onChange = { new -> viewModel.edit { it.copy(model = new) } }
                 )
                 Field(
-                    label = "Category",
-                    value = state.draft.category,
-                    onChange = { new -> viewModel.edit { it.copy(category = new) } }
-                )
-                Field(
                     label = "Colour",
                     value = state.draft.colour,
                     onChange = { new -> viewModel.edit { it.copy(colour = new) } }
                 )
-                Field(
-                    label = "Size or sweep (mm)",
-                    value = state.draft.sizeSweep,
-                    error = state.errors.sizeSweep.takeIf { state.showErrors },
-                    keyboard = KeyboardType.Number,
-                    onChange = { new -> viewModel.edit { it.copy(sizeSweep = new) } }
-                )
+                // Only the field(s) this category actually uses -- a fan shows
+                // Size, a mixer shows Wattage, never both indiscriminately.
+                if (CategoryTaxonomy.hasSizeField(state.draft.category)) {
+                    Field(
+                        label = "Size or sweep (mm)",
+                        value = state.draft.sizeSweep,
+                        error = state.errors.sizeSweep.takeIf { state.showErrors },
+                        keyboard = KeyboardType.Number,
+                        onChange = { new -> viewModel.edit { it.copy(sizeSweep = new) } }
+                    )
+                }
+                if (CategoryTaxonomy.hasWattageField(state.draft.category)) {
+                    Field(
+                        label = "Wattage (W)",
+                        value = state.draft.wattage,
+                        keyboard = KeyboardType.Number,
+                        onChange = { new -> viewModel.edit { it.copy(wattage = new) } }
+                    )
+                }
                 Field(
                     label = "MRP (₹)",
                     value = state.draft.mrpText,
@@ -290,6 +315,15 @@ fun ProductEditScreen(
                     color = FanLensColors.InkMuted
                 )
                 Spacer(Modifier.height(8.dp))
+                CategoryTaxonomy.templateFor(state.draft.category)?.let {
+                    TextButton(onClick = viewModel::applySuggestedSpecs) {
+                        Text(
+                            "Add usual ${state.draft.category.trim().lowercase()} fields",
+                            color = FanLensColors.BrandRed,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             }
 
             itemsIndexed(state.draft.specs) { index, row ->
@@ -412,6 +446,88 @@ private fun SectionLabel(text: String) {
         color = FanLensColors.InkMuted
     )
     Spacer(Modifier.height(6.dp))
+}
+
+/**
+ * The exact same category list as the PC Catalogue Manager's dropdown
+ * (CategoryTaxonomy.STANDARD_CATEGORIES), plus anything already used by a
+ * product here, so category names never fragment into near-duplicates like
+ * "Ceiling fan" vs "ceiling_fan" across the two tools. "Other…" reveals a
+ * text box so a new kind of product is never blocked.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CategoryField(
+    draftId: String?,
+    category: String,
+    usedCategories: List<String>,
+    onChange: (String) -> Unit
+) {
+    val options = remember(usedCategories) {
+        (CategoryTaxonomy.STANDARD_CATEGORIES + usedCategories)
+            .distinctBy { it.lowercase() }
+            .sortedBy { it.lowercase() }
+    }
+    val matchesKnown = options.any { it.equals(category, ignoreCase = true) }
+    var expanded by remember { mutableStateOf(false) }
+    // Sticks once picked, even while the text box below is still blank, so
+    // typing a custom category doesn't keep bouncing the box back to the
+    // list. Keyed on draftId (this ViewModel survives across edit sessions,
+    // per ProductEditViewModel.start()'s own doc comment) so opening a
+    // different product resets this instead of carrying over the last one's.
+    var otherMode by remember(draftId, options) { mutableStateOf(category.isNotBlank() && !matchesKnown) }
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+            OutlinedTextField(
+                value = if (otherMode) "Other…" else category,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Category") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+            )
+            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                DropdownMenuItem(
+                    text = { Text("— none —") },
+                    onClick = {
+                        otherMode = false
+                        onChange("")
+                        expanded = false
+                    }
+                )
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option) },
+                        onClick = {
+                            otherMode = false
+                            onChange(option)
+                            expanded = false
+                        }
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Other…") },
+                    onClick = {
+                        otherMode = true
+                        expanded = false
+                    }
+                )
+            }
+        }
+        if (otherMode) {
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                value = category.takeUnless { matchesKnown }.orEmpty(),
+                onValueChange = onChange,
+                label = { Text("Type the category") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
 }
 
 @Composable
