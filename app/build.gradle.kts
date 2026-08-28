@@ -17,6 +17,17 @@ val keystoreProperties = Properties().apply {
     if (hasReleaseSigning) load(keystorePropertiesFile.inputStream())
 }
 
+// The base, hand-set version -- bump these for a real milestone. The
+// automated release workflow (.github/workflows/android-build.yml) instead
+// passes -PoverrideVersionCode/-PoverrideVersionName so every automated build
+// gets a genuinely higher version than the last one without editing this file
+// on every merge -- see UpdateChecker.isNewer, which compares exactly the
+// versionName ending up in BuildConfig. A plain local `./gradlew
+// assembleDebug`/`assembleRelease` passes neither override, so it keeps
+// building this version exactly as written below.
+val overrideVersionCode = (findProperty("overrideVersionCode") as String?)?.toIntOrNull()
+val overrideVersionName = findProperty("overrideVersionName") as String?
+
 android {
     namespace = "com.fanlens.prototype"
     compileSdk = 37
@@ -25,8 +36,8 @@ android {
         applicationId = "com.fanlens.prototype"
         minSdk = 26
         targetSdk = 37
-        versionCode = 14
-        versionName = "0.10.1"
+        versionCode = overrideVersionCode ?: 14
+        versionName = overrideVersionName ?: "0.10.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
