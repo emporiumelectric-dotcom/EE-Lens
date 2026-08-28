@@ -142,8 +142,44 @@ jobs:
           keyPassword=$KEY_PW
           PROPS
 
+      # Every automated release used to tag as plain v<versionName> --
+      # app/build.gradle.kts's hand-set base, unchanged by this workflow --
+      # so every merge to main published under the exact same tag and
+      # "Check for update" could never see a new build. Appending the run
+      # number as a further dot-separated *numeric* segment (never a hyphen
+      # or any other non-numeric suffix) keeps it comparable: UpdateChecker.
+      # isNewer splits on "." and silently drops any segment that isn't a
+      # plain integer, so a hyphenated build tag would parse as if that
+      # segment were simply missing -- an all-numeric segment instead
+      # compares correctly, and $GITHUB_RUN_NUMBER only ever increases for
+      # this workflow, so every automated release is genuinely newer than
+      # the last one, however the hand-set base changes over time.
+      - name: Compute this release's version
+        id: version
+        run: |
+          baseName=$(grep -oP 'versionName\s*=\s*overrideVersionName\s*\?:\s*"\K[^"]+' app/build.gradle.kts)
+          baseCode=$(grep -oP 'versionCode\s*=\s*overrideVersionCode\s*\?:\s*\K[0-9]+' app/build.gradle.kts)
+          if [ -z "$baseName" ] || [ -z "$baseCode" ]; then
+            echo "::error::Could not find the base versionName/versionCode in app/build.gradle.kts" >&2
+            exit 1
+          fi
+          name="$baseName.$GITHUB_RUN_NUMBER"
+          code=$((baseCode + GITHUB_RUN_NUMBER))
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "tag=v$name" >> "$GITHUB_OUTPUT"
+
+      # Overrides passed straight to Gradle so the APK that actually ships
+      # carries this same computed version in its own BuildConfig -- not
+      # just the GitHub release tag -- otherwise "You have version X" on the
+      # Backup screen would never change after installing it, and the very
+      # next automated release would look newer than this one for no reason
+      # (see app/build.gradle.kts's overrideVersionCode/overrideVersionName).
       - name: Build signed release APK
-        run: ./gradlew assembleRelease --stacktrace
+        run: |
+          ./gradlew assembleRelease --stacktrace \
+            -PoverrideVersionCode=${{ steps.version.outputs.code }} \
+            -PoverrideVersionName=${{ steps.version.outputs.name }}
 
       # Done with the keystore the moment the signed APK exists -- removed
       # here, before the release gets published, rather than deferred to an
@@ -152,24 +188,11 @@ jobs:
         if: always()
         run: rm -rf keystore keystore.properties
 
-      - name: Read app versionName
-        id: version
-        run: |
-          name=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
-          if [ -z "$name" ]; then
-            echo "::error::Could not find versionName in app/build.gradle.kts" >&2
-            exit 1
-          fi
-          echo "name=$name" >> "$GITHUB_OUTPUT"
-          echo "tag=v$name" >> "$GITHUB_OUTPUT"
-
       # UpdateChecker reads tag_name (minus a leading v/V) as the version to
       # compare against BuildConfig.VERSION_NAME, and picks the first asset
-      # ending in .apk -- so the tag must stay exactly v<versionName> (no
-      # build-number suffix, which would break that numeric comparison) and
-      # app-release.apk must be attached. Pushing to main again on the same
-      # versionName updates this same release/tag with the new APK instead
-      # of failing on a duplicate tag.
+      # ending in .apk -- so the tag must stay exactly v<computed versionName>
+      # and app-release.apk must be attached. Every run number is unique, so
+      # this always publishes a new release/tag rather than updating one.
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
