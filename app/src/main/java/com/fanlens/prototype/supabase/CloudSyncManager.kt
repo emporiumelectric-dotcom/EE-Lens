@@ -72,6 +72,13 @@ class CloudSyncManager(
     suspend fun pullAll(onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }): SyncSummary {
         val token = authClient.ensureFreshSession()?.accessToken
         val remoteProducts = sync.fetchAllProducts(token)
+        // Fetched once, then kept current as rows are written below -- not
+        // just for one query instead of several per remote row, but so two
+        // remote rows in the same pull that both fall back to a content
+        // match (see selectPullMatch) don't both land on the same stale
+        // local candidate.
+        val localsByCurrentId = database.productDao().allIncludingDeleted()
+            .associateByTo(mutableMapOf()) { it.id }
         var processed = 0
         var failed = 0
         val total = remoteProducts.length()
@@ -80,7 +87,7 @@ class CloudSyncManager(
             val row = remoteProducts.getJSONObject(i)
             val clientId = row.optString("client_id").takeIf { it.isNotBlank() } ?: continue
             try {
-                pullProduct(token, row, clientId)
+                pullProduct(token, row, clientId, localsByCurrentId)
                 processed++
             } catch (error: Throwable) {
                 failed++
@@ -167,16 +174,37 @@ class CloudSyncManager(
 
     // ---------------- pull ----------------
 
-    private suspend fun pullProduct(token: String?, row: JSONObject, clientId: String) {
-        // A legacy-id product's client_id is a generated cloudClientId, not
-        // its real id -- match on both, and never rename its local row to
-        // the cloud's UUID underneath the owner.
-        val local = database.productDao().byId(clientId) ?: database.productDao().byCloudClientId(clientId)
+    private suspend fun pullProduct(
+        token: String?,
+        row: JSONObject,
+        clientId: String,
+        localsByCurrentId: MutableMap<String, ProductEntity>
+    ) {
+        val local = selectPullMatch(
+            clientId = clientId,
+            brand = row.optString("brand"),
+            name = row.optString("name"),
+            model = row.optString("model"),
+            locals = localsByCurrentId.values
+        )
         val localId = local?.id ?: clientId
 
         if (!row.isNull("deleted_at") && row.optString("deleted_at").isNotBlank()) {
             if (local != null && local.deletedAt == null) {
-                database.productDao().softDelete(localId, fromIso(row.optString("deleted_at")))
+                // Record a mapping discovered only just now (the content
+                // fallback) even here -- otherwise a later push of this same
+                // now-deleted local row mints a second, orphaned deleted row
+                // in the cloud instead of updating the one already there.
+                if (clientId != localId && local.cloudClientId != clientId) {
+                    database.productDao().setCloudClientId(localId, clientId)
+                }
+                val deletedAt = fromIso(row.optString("deleted_at"))
+                database.productDao().softDelete(localId, deletedAt)
+                localsByCurrentId[localId] = local.copy(
+                    cloudClientId = clientId.takeIf { it != localId } ?: local.cloudClientId,
+                    deletedAt = deletedAt,
+                    updatedAt = deletedAt
+                )
             }
             return
         }
@@ -235,7 +263,13 @@ class CloudSyncManager(
 
             val entity = ProductEntity(
                 id = localId,
-                cloudClientId = local?.cloudClientId,
+                // Whatever path found this row, this device now knows its
+                // cloud identity: null when the local id already is that
+                // identity (the common case, and a brand new local row),
+                // otherwise the client_id itself -- including a match found
+                // only by content just now, so the next pull (or push) uses
+                // it directly instead of falling back again.
+                cloudClientId = clientId.takeIf { it != localId },
                 slug = local?.slug?.takeIf { it.isNotBlank() }
                     ?: CatalogRepository.slugify(row.optString("brand"), row.optString("name"), localId),
                 brand = row.optString("brand"),
@@ -261,6 +295,7 @@ class CloudSyncManager(
                 if (local != null) database.productDao().update(entity) else database.productDao().insert(entity)
                 newPhotos.forEach { database.photoDao().insert(it) }
             }
+            localsByCurrentId[localId] = entity
         } catch (error: Throwable) {
             writtenFiles.forEach { photoStore.delete(localId, it) }
             throw error
@@ -293,5 +328,41 @@ class CloudSyncManager(
         private fun fromIso(iso: String?): Long =
             iso?.takeIf { it.isNotBlank() }?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
                 ?: System.currentTimeMillis()
+    }
+}
+
+/**
+ * Which local product (if any) a cloud row with this identity corresponds
+ * to -- the decision that determines whether a pull updates an existing
+ * product or duplicates it. Pure and dependency-free (no database, no
+ * network) so this exact logic is unit-testable on its own; see
+ * CloudSyncManagerTest.
+ *
+ * Tried in order:
+ *  1. The row's client_id as a local id -- the common case: this device's
+ *     own earlier push, where the local id already is the cloud identity.
+ *  2. As a recorded cloudClientId -- a legacy-id product (client_id isn't a
+ *     valid local id there) this device has already reconciled once.
+ *  3. By content, live rows only -- a legacy-id product (typically the
+ *     bundled catalogue) pushed by a *different* device under a client_id
+ *     this one has never seen, so neither id check can find it. Weak
+ *     identity on its own, so it only runs once both id checks have missed,
+ *     and never matches a product the owner deleted here.
+ */
+internal fun selectPullMatch(
+    clientId: String,
+    brand: String,
+    name: String,
+    model: String,
+    locals: Collection<ProductEntity>
+): ProductEntity? {
+    locals.firstOrNull { it.id == clientId }?.let { return it }
+    locals.firstOrNull { it.cloudClientId == clientId }?.let { return it }
+    if (brand.isBlank() || name.isBlank()) return null
+    return locals.firstOrNull {
+        it.deletedAt == null &&
+            it.brand.equals(brand, ignoreCase = true) &&
+            it.name.equals(name, ignoreCase = true) &&
+            it.model.equals(model, ignoreCase = true)
     }
 }
