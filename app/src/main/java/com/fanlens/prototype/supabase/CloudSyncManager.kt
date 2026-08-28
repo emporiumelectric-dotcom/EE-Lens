@@ -381,6 +381,29 @@ internal fun pushWouldLoseToRemote(remoteUpdatedAt: Long?, localUpdatedAt: Long)
 }
 
 /**
+ * What (if anything) to tell the Products screen's owner about a pull-to-
+ * refresh, given how it went. Exists because a failed pull used to be
+ * completely invisible: the call site wrapped it in a bare runCatching with
+ * no logging and nothing shown on screen, so there was no way to tell "the
+ * gesture didn't fire", "it fired but couldn't reach the cloud", and "it
+ * reached the cloud but a genuine sync failure" apart -- see
+ * ElectricEmporiumScreen's onRefresh, which now logs [result]'s exception
+ * and shows whatever this returns.
+ *
+ * A clean pull (or one that reached the cloud and applied every row) returns
+ * null -- the product count already on screen says enough on its own. Pure
+ * and dependency-free so this decision is unit-testable without a network or
+ * a device; see CloudRefreshStatusTest.
+ */
+internal fun cloudRefreshStatusMessage(result: Result<CloudSyncManager.SyncSummary>): String? {
+    val summary = result.getOrNull()
+        ?: return "Couldn't reach the cloud — showing what's already on this phone"
+    if (summary.failed == 0) return null
+    val noun = if (summary.total == 1) "product" else "products"
+    return "Cloud pull failed for ${summary.failed} of ${summary.total} $noun"
+}
+
+/**
  * Which local product (if any) a cloud row with this identity corresponds
  * to -- the decision that determines whether a pull updates an existing
  * product or duplicates it. Pure and dependency-free (no database, no

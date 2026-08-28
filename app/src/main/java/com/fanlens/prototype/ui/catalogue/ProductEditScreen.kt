@@ -173,8 +173,8 @@ fun ProductEditScreen(
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Photos of the actual product on your shelf. These are what the camera " +
-                        "matches against — they are never shown to customers.",
+                    text = "Photos of the actual product on your shelf. The camera checks these " +
+                        "first — they are never shown to customers.",
                     style = MaterialTheme.typography.bodySmall,
                     color = FanLensColors.InkMuted
                 )
@@ -182,7 +182,7 @@ fun ProductEditScreen(
             }
 
             item {
-                SectionLabel("Catalogue photos · shown in the app")
+                SectionLabel("Catalogue photos · also used for recognition")
                 Text(
                     text = when (val count = state.countWithRole(PhotoRole.Display)) {
                         0 -> "Optional — clean product images for the gallery"
@@ -205,7 +205,8 @@ fun ProductEditScreen(
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Clean images from a catalogue or the manufacturer. Tap a photo to make " +
+                    text = "Clean images from a catalogue or the manufacturer — also checked by the " +
+                        "camera when the shop photos don't confidently match. Tap a photo to make " +
                         "it the cover, or tap its badge to move it to the other section. Every " +
                         "photo is copied into EE Lens, so deleting the original will not break it.",
                     style = MaterialTheme.typography.bodySmall,

@@ -6,6 +6,7 @@ package com.fanlens.prototype.ui
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.SystemClock
+import android.util.Log
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.camera.core.CameraSelector
@@ -87,6 +88,7 @@ import com.fanlens.prototype.model.ProductDetection
 import com.fanlens.prototype.model.RecognitionResult
 import com.fanlens.prototype.recognition.ProductRecognitionEngine
 import com.fanlens.prototype.recognition.RecognitionPreprocessing
+import com.fanlens.prototype.supabase.cloudRefreshStatusMessage
 import com.fanlens.prototype.ui.backup.BackupScreen
 import com.fanlens.prototype.ui.backup.BackupViewModel
 import com.fanlens.prototype.ui.catalogue.ProductDetailScreen
@@ -125,6 +127,11 @@ fun ElectricEmporiumScreen(
     // here -- one product or several, the undo bar and purge timer below don't care.
     var recentlyDeleted by remember { mutableStateOf<List<Product>>(emptyList()) }
     var refreshingCatalogue by remember { mutableStateOf(false) }
+    // Set only when a pull-to-refresh has something worth telling the owner
+    // (couldn't reach the cloud, or reached it but a row failed) -- see
+    // cloudRefreshStatusMessage. A clean pull never touches this, so the
+    // ordinary product count keeps showing.
+    var cloudRefreshMessage by remember { mutableStateOf<String?>(null) }
 
     val scope = rememberCoroutineScope()
     val preparation by recognitionEngine.preparation.collectAsState()
@@ -140,6 +147,15 @@ fun ElectricEmporiumScreen(
     // each analysed frame does.
     LaunchedEffect(preparation) {
         status = preparation.message
+    }
+
+    // A cloud-pull status message clears itself -- there is no dismiss action
+    // for it, so it would otherwise sit in the header until the next refresh.
+    LaunchedEffect(cloudRefreshMessage) {
+        if (cloudRefreshMessage != null) {
+            delay(CLOUD_REFRESH_MESSAGE_MS)
+            cloudRefreshMessage = null
+        }
     }
 
     // Deleted products are only removed from disk once the undo window closes.
@@ -210,7 +226,7 @@ fun ElectricEmporiumScreen(
             EeBrandHeader(
                 cameraAllowed = cameraAllowed,
                 status = if (section == EeSection.Products) {
-                    productCountLabel(products.size)
+                    cloudRefreshMessage ?: productCountLabel(products.size)
                 } else if (section == EeSection.Backup) {
                     "Keep a catalogue file somewhere safe"
                 } else if (cameraAllowed) {
@@ -276,14 +292,21 @@ fun ElectricEmporiumScreen(
                         refreshing = refreshingCatalogue,
                         onRefresh = {
                             refreshingCatalogue = true
+                            cloudRefreshMessage = null
                             scope.launch {
                                 // Same pull logic "Pull from cloud" used to trigger, just started
-                                // by the gesture instead of a button. Failure (most likely no
-                                // signal) is silent here, same as the local refresh below always
-                                // was -- whatever is already on this phone is unaffected either way.
-                                runCatching {
+                                // by the gesture instead of a button. A failure (no signal, the
+                                // cloud unreachable, a row that wouldn't sync) no longer vanishes
+                                // silently: it's logged, and cloudRefreshStatusMessage decides
+                                // whether it's worth telling the owner about in the header --
+                                // whatever is already on this phone is unaffected either way.
+                                val pullResult = runCatching {
                                     withContext(Dispatchers.IO) { repository.cloudPullAll() }
                                 }
+                                pullResult.exceptionOrNull()?.let {
+                                    Log.e(TAG, "Cloud pull-to-refresh failed", it)
+                                }
+                                cloudRefreshMessage = cloudRefreshStatusMessage(pullResult)
                                 runCatching {
                                     withContext(Dispatchers.Default) { recognitionEngine.refresh() }
                                 }
@@ -360,6 +383,8 @@ private sealed interface EeRoute {
 }
 
 private const val UNDO_WINDOW_MS = 10_000L
+private const val CLOUD_REFRESH_MESSAGE_MS = 6_000L
+private const val TAG = "EeElectricEmporium"
 
 @Composable
 private fun EeUndoBar(message: String, onUndo: () -> Unit, modifier: Modifier = Modifier) {

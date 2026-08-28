@@ -140,50 +140,31 @@ class OnDeviceProductRecognitionEngine(
         val query = activeGenerator.embed(bitmap)
             ?: return RecognitionResult(null, "Aim at one product")
 
-        // Shop photos are asked first and judged exactly as before. Only when
-        // they decline does the catalogue index get a say, so adding catalogue
-        // photos can never change what happens in front of a real shelf.
-        val shopRanked = shop.rank(query)
-        val shopBest = shopRanked.firstOrNull()
-        if (shopBest != null) {
-            val runnerUp = shopRanked.getOrNull(1)?.score ?: 0f
-            val product = productsById[shopBest.productId]
-            if (product != null && MatchPolicy.acceptShop(shopBest.score, runnerUp)) {
-                return RecognitionResult(
-                    detection = detection(product, shopBest.score, MatchSource.Shop),
-                    status = "Match found"
+        // The actual shop-vs-catalogue decision is pulled out into resolveMatch
+        // below so it can be unit tested without a Bitmap or a real model --
+        // this just maps that pure decision onto a RecognitionResult.
+        val products = productsById
+        return when (val decision = resolveMatch(shop, catalogue, query, products::containsKey)) {
+            is MatchDecision.Found -> {
+                val product = products.getValue(decision.productId)
+                RecognitionResult(
+                    detection = detection(product, decision.score, decision.source),
+                    status = if (decision.source == MatchSource.Shop) {
+                        "Match found"
+                    } else {
+                        "Matched from a catalogue image"
+                    }
                 )
             }
-        }
-
-        val catalogueRanked = catalogue.rank(query)
-        val catalogueBest = catalogueRanked.firstOrNull()
-        if (catalogueBest != null) {
-            val runnerUp = catalogueRanked.getOrNull(1)?.score ?: 0f
-            val product = productsById[catalogueBest.productId]
-            if (product != null && MatchPolicy.acceptCatalogue(catalogueBest.score, runnerUp)) {
-                return RecognitionResult(
-                    detection = detection(product, catalogueBest.score, MatchSource.Catalogue),
-                    status = "Matched from a catalogue image"
+            is MatchDecision.Closest -> {
+                val product = products.getValue(decision.productId)
+                RecognitionResult(
+                    null,
+                    "Closest: ${product.name} ${(decision.score.coerceIn(0f, 1f) * 100).roundToInt()}%"
                 )
             }
+            MatchDecision.None -> RecognitionResult(null, "Aim at one product")
         }
-
-        // Report whichever index came closest, so the owner can see why nothing
-        // matched -- but only when that guess is close enough to be worth
-        // showing. Below MatchPolicy.CLOSEST_DISPLAY_THRESHOLD it reads as a
-        // find when it is really noise (e.g. "Atomberg Aris Contour Smart
-        // 14%" for a product that isn't even in frame).
-        val closest = listOfNotNull(shopBest, catalogueBest).maxByOrNull { it.score }
-        val closestProduct = closest?.let { productsById[it.productId] }
-        if (closestProduct == null || !MatchPolicy.shouldShowClosest(closest.score)) {
-            return RecognitionResult(null, "Aim at one product")
-        }
-
-        return RecognitionResult(
-            null,
-            "Closest: ${closestProduct.name} ${(closest.score.coerceIn(0f, 1f) * 100).roundToInt()}%"
-        )
     }
 
     private fun detection(product: Product, score: Float, source: MatchSource) = ProductDetection(
@@ -203,6 +184,65 @@ class OnDeviceProductRecognitionEngine(
 }
 
 private const val TAG = "EeRecognition"
+
+/**
+ * The outcome of judging one query fingerprint against both indexes -- exactly
+ * what [OnDeviceProductRecognitionEngine.recognize] used to compute inline,
+ * pulled out so [resolveMatch] can be unit tested with plain [EmbeddingIndex]
+ * fixtures instead of a Bitmap and a real on-device model.
+ */
+internal sealed interface MatchDecision {
+    data class Found(val productId: String, val score: Float, val source: MatchSource) : MatchDecision
+    data class Closest(val productId: String, val score: Float) : MatchDecision
+    data object None : MatchDecision
+}
+
+/**
+ * Ranks [query] against both indexes and applies [MatchPolicy], shop first:
+ * shop is judged and, if accepted, returned immediately -- catalogue is only
+ * ever consulted once shop has declined, so adding catalogue photos to the
+ * reference set cannot change what happens in front of a real shelf. This is
+ * the same decision [OnDeviceProductRecognitionEngine.recognize] made inline
+ * before it was extracted here for testability; behaviour is unchanged.
+ *
+ * [knownProduct] mirrors the caller's live-product lookup, so a fingerprint
+ * left behind for a product that no longer exists is skipped rather than
+ * reported -- the same guard the inline version had via a nullable map lookup.
+ */
+internal fun resolveMatch(
+    shop: EmbeddingIndex,
+    catalogue: EmbeddingIndex,
+    query: FloatArray,
+    knownProduct: (String) -> Boolean
+): MatchDecision {
+    val shopRanked = shop.rank(query)
+    val shopBest = shopRanked.firstOrNull()
+    if (shopBest != null && knownProduct(shopBest.productId)) {
+        val runnerUp = shopRanked.getOrNull(1)?.score ?: 0f
+        if (MatchPolicy.acceptShop(shopBest.score, runnerUp)) {
+            return MatchDecision.Found(shopBest.productId, shopBest.score, MatchSource.Shop)
+        }
+    }
+
+    val catalogueRanked = catalogue.rank(query)
+    val catalogueBest = catalogueRanked.firstOrNull()
+    if (catalogueBest != null && knownProduct(catalogueBest.productId)) {
+        val runnerUp = catalogueRanked.getOrNull(1)?.score ?: 0f
+        if (MatchPolicy.acceptCatalogue(catalogueBest.score, runnerUp)) {
+            return MatchDecision.Found(catalogueBest.productId, catalogueBest.score, MatchSource.Catalogue)
+        }
+    }
+
+    // Report whichever index came closest, so the owner can see why nothing
+    // matched -- but only when that guess is close enough to be worth showing,
+    // and only when it still resolves to a real product (same as above).
+    val closest = listOfNotNull(shopBest, catalogueBest).maxByOrNull { it.score }
+    return if (closest != null && knownProduct(closest.productId) && MatchPolicy.shouldShowClosest(closest.score)) {
+        MatchDecision.Closest(closest.productId, closest.score)
+    } else {
+        MatchDecision.None
+    }
+}
 
 internal object MatchPolicy {
     /**
