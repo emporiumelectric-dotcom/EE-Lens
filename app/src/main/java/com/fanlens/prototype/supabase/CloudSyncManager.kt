@@ -145,17 +145,26 @@ class CloudSyncManager(
         val remotePhotoIdByLocalId = mutableMapOf<String, Long>()
         for (photo in photos) {
             val photoClientId = resolvePhotoClientId(photo)
-            if (photo.syncedAt == null) {
-                val bytes = photoStore.fullFile(product.id, photo.id).readBytes()
-                sync.uploadPhoto(accessToken, product.id, photo.id, bytes)
-            }
             val photoBody = JSONObject()
                 .put("client_id", photoClientId)
                 .put("product_id", remoteId)
                 .put("role", localRoleToCloud(photo.role))
-                .put("storage_path", SupabaseSyncClient.photoStoragePath(product.id, photo.id))
                 .put("sort_order", photo.sortOrder)
                 .put("checksum", photo.sha256)
+            if (photo.syncedAt == null) {
+                // The storage path is keyed by clientId/photoClientId (the
+                // cloud identity), never product.id/photo.id (the local
+                // one) -- a legacy-id product's local id is a fixed slug
+                // like "havells-stealth-air-pearl-white", not something a
+                // pulling device can ever reconstruct on its own. storage_
+                // path is only ever set here, the one place bytes actually
+                // land at that path; an already-synced photo below leaves
+                // it out of the upsert body entirely so a repeat push can
+                // never point the row at a path nothing was written to.
+                val bytes = photoStore.fullFile(product.id, photo.id).readBytes()
+                sync.uploadPhoto(accessToken, clientId, photoClientId, bytes)
+                photoBody.put("storage_path", SupabaseSyncClient.photoStoragePath(clientId, photoClientId))
+            }
             val savedPhoto = sync.upsertPhoto(accessToken, photoBody)
             remotePhotoIdByLocalId[photo.id] = savedPhoto.getLong("id")
             if (photo.syncedAt == null) database.photoDao().setSyncedAt(photo.id, System.currentTimeMillis())
@@ -225,27 +234,38 @@ class CloudSyncManager(
         val localId = local?.id ?: clientId
 
         if (!row.isNull("deleted_at") && row.optString("deleted_at").isNotBlank()) {
-            if (local != null && local.deletedAt == null) {
-                // Record a mapping discovered only just now (the content
-                // fallback) even here -- otherwise a later push of this same
-                // now-deleted local row mints a second, orphaned deleted row
-                // in the cloud instead of updating the one already there.
-                if (clientId != localId && local.cloudClientId != clientId) {
-                    database.productDao().setCloudClientId(localId, clientId)
-                }
+            // A content-only match (no id or cloudClientId match -- see
+            // selectPullMatch) is too weak to trust with a delete: unlike
+            // applying data, where a false positive just means an extra
+            // update, deleting the wrong local row is unrecoverable. A
+            // duplicate or orphaned remote row sharing brand/name/model with
+            // a genuinely live local product must never take it down with it
+            // when the duplicate itself gets cleaned up.
+            if (local != null && (local.id == clientId || local.cloudClientId == clientId) && local.deletedAt == null) {
                 val deletedAt = fromIso(row.optString("deleted_at"))
                 database.productDao().softDelete(localId, deletedAt)
-                localsByCurrentId[localId] = local.copy(
-                    cloudClientId = clientId.takeIf { it != localId } ?: local.cloudClientId,
-                    deletedAt = deletedAt,
-                    updatedAt = deletedAt
-                )
+                localsByCurrentId[localId] = local.copy(deletedAt = deletedAt, updatedAt = deletedAt)
             }
             return
         }
 
         val remoteUpdatedAt = fromIso(row.optString("updated_at"))
-        if (local != null && local.updatedAt >= remoteUpdatedAt) return // local wins; it will be pushed instead
+        if (local != null && local.updatedAt >= remoteUpdatedAt) {
+            // Same reasoning as the deleted-row branch above: a match found
+            // only by content (no id-based match yet) still needs the
+            // discovered cloud identity recorded now, even though local data
+            // wins and nothing else about the row changes here -- otherwise
+            // this device never learns it, and the next time it pushes this
+            // same product, resolveProductClientId sees no known client_id
+            // and mints a brand new one, creating a duplicate remote row
+            // instead of updating this one. This is the actual bug behind
+            // the "Havells Stealth Air" duplicate.
+            if (clientId != localId && local.cloudClientId != clientId) {
+                database.productDao().setCloudClientId(localId, clientId)
+                localsByCurrentId[localId] = local.copy(cloudClientId = clientId)
+            }
+            return // local wins; it will be pushed instead
+        }
 
         val remoteId = row.getLong("id")
         val remotePhotos = sync.fetchPhotosForProduct(token, remoteId)

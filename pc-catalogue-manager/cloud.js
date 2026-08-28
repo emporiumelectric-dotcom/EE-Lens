@@ -150,8 +150,8 @@ async function cloudRest(method, table, body, { headers, query, prefer } = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-async function cloudUploadPhoto(productId, photo, headers) {
-  const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_PHOTOS_BUCKET}/${cloudPhotoPath(productId, photo.id)}`;
+async function cloudUploadPhoto(productClientId, photoClientId, photo, headers) {
+  const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_PHOTOS_BUCKET}/${cloudPhotoPath(productClientId, photoClientId)}`;
   const response = await fetchWithTimeout(
     url,
     {
@@ -246,24 +246,33 @@ async function cloudPushProduct(product, headers) {
   let touched = false;
   for (const photo of photos) {
     const photoClientId = await resolvePhotoClientId(photo);
+    const photoBody = {
+      client_id: photoClientId,
+      product_id: savedProduct.id,
+      role: localRoleToCloud(photo.role),
+      sort_order: photo.sortOrder,
+      checksum: photo.sha256
+    };
     if (photo.cloudPushedSha256 !== photo.sha256) {
-      await cloudUploadPhoto(product.id, photo, headers);
+      // Keyed by clientId/photoClientId (the cloud identity), never
+      // product.id/photo.id (the local one) -- a legacy-id product's local
+      // id is a fixed slug like "havells-stealth-air-pearl-white", not
+      // something a pulling device can ever reconstruct on its own.
+      // storage_path is only ever set here, the one place bytes actually
+      // land at that path; an already-pushed photo below leaves it out of
+      // the upsert entirely so a repeat push can never point the row at a
+      // path nothing was written to. See CloudSyncManager.kt's pushProduct
+      // for the same fix on Android.
+      await cloudUploadPhoto(clientId, photoClientId, photo, headers);
       photo.cloudPushedSha256 = photo.sha256;
       touched = true;
+      photoBody.storage_path = cloudPhotoPath(clientId, photoClientId);
     }
-    const [savedPhoto] = await cloudRest(
-      'POST',
-      'product_photos',
-      {
-        client_id: photoClientId,
-        product_id: savedProduct.id,
-        role: localRoleToCloud(photo.role),
-        storage_path: cloudPhotoPath(product.id, photo.id),
-        sort_order: photo.sortOrder,
-        checksum: photo.sha256
-      },
-      { headers, query: 'on_conflict=client_id', prefer: 'resolution=merge-duplicates,return=representation' }
-    );
+    const [savedPhoto] = await cloudRest('POST', 'product_photos', photoBody, {
+      headers,
+      query: 'on_conflict=client_id',
+      prefer: 'resolution=merge-duplicates,return=representation'
+    });
     remotePhotoIdByLocalId[photo.id] = savedPhoto.id;
   }
   if (touched) await putPhotos(photos);
@@ -347,6 +356,31 @@ async function cloudPushAll(onProgress) {
 }
 
 /**
+ * Which local product (if any) a cloud row with this identity corresponds
+ * to -- mirrors CloudSyncManager.kt's selectPullMatch on Android (added
+ * there to fix the same duplication this port fixes on PC; see that
+ * function's own comment for the full rationale). Pure and dependency-
+ * free, tried in order:
+ *  1. The row's client_id as a local id -- this device's own earlier push.
+ *  2. As a recorded cloudClientId -- a legacy-id product already
+ *     reconciled once.
+ *  3. By content (brand/name/model) -- a legacy-id product (typically the
+ *     bundled catalogue) pushed by a *different* device under a client_id
+ *     this one has never seen. Weak identity on its own, so it only runs
+ *     once both id-based checks have missed.
+ */
+function selectPullMatch(clientId, brand, name, model, locals) {
+  for (const p of locals) if (p.id === clientId) return p;
+  for (const p of locals) if (p.cloudClientId === clientId) return p;
+  if (!brand || !name) return null;
+  const norm = (s) => (s || '').trim().toLowerCase();
+  for (const p of locals) {
+    if (norm(p.brand) === norm(brand) && norm(p.name) === norm(name) && norm(p.model) === norm(model)) return p;
+  }
+  return null;
+}
+
+/**
  * Pulls every remote product. A remote row newer than the matching local one
  * (or not seen locally yet) overwrites it; a locally-newer row is left alone
  * -- it will win on the next push instead. Remote deletions remove the local
@@ -359,12 +393,7 @@ async function cloudPullAll(onProgress) {
     query: 'select=*&order=updated_at.asc'
   });
   const localAll = await listProducts();
-  const localById = new Map(localAll.map((p) => [p.id, p]));
-  // Legacy-id products (the bundled catalogue) are pushed under a generated
-  // cloudClientId instead of their real id -- match on that too, or a remote
-  // row with no local match yet reads as brand new every single pull.
-  const localByCloudClientId = new Map(localAll.filter((p) => p.cloudClientId).map((p) => [p.cloudClientId, p]));
-  const findLocalProduct = (clientId) => localById.get(clientId) || localByCloudClientId.get(clientId) || null;
+  const findLocalProduct = (rp) => selectPullMatch(rp.client_id, rp.brand, rp.name, rp.model, localAll);
 
   let pulled = 0;
   const failed = [];
@@ -374,18 +403,43 @@ async function cloudPullAll(onProgress) {
     if (!rp.client_id) continue; // a row nothing here created yet; no local id to match
 
     try {
-      const localProduct = findLocalProduct(rp.client_id);
+      const localProduct = findLocalProduct(rp);
       // The row a legacy-id product owns locally keeps its real id -- never
       // rename it to the cloud's generated UUID underneath the owner.
       const localId = localProduct ? localProduct.id : rp.client_id;
 
       if (rp.deleted_at) {
-        if (localProduct) await deleteProduct(localId);
+        // A content-only match (no id or cloudClientId match -- see
+        // selectPullMatch) is too weak to trust with a delete: unlike
+        // applying data, where a false positive just means an extra update,
+        // deleting the wrong local row is unrecoverable (PC hard-deletes).
+        // A duplicate or orphaned remote row sharing brand/name/model with
+        // a genuinely live local product must never take it down with it
+        // when the duplicate itself gets cleaned up. See CloudSyncManager.
+        // kt's pullProduct for the same fix on Android.
+        if (localProduct && (localProduct.id === rp.client_id || localProduct.cloudClientId === rp.client_id)) {
+          await deleteProduct(localId);
+        }
         continue;
       }
 
       const remoteUpdatedAt = new Date(rp.updated_at).getTime();
-      if (localProduct && localProduct.updatedAt >= remoteUpdatedAt) continue; // local wins, unchanged
+      if (localProduct && localProduct.updatedAt >= remoteUpdatedAt) {
+        // A match found only by content (no id-based match yet) still needs
+        // the discovered cloud identity recorded now, even though local data
+        // wins and nothing else about the row changes here -- otherwise this
+        // PC never learns it, and the next time it pushes this same product,
+        // resolveCloudClientId sees no known cloudClientId and mints a brand
+        // new one, creating a duplicate remote row instead of updating this
+        // one. This is the actual bug behind the "Havells Stealth Air"
+        // duplicate -- see CloudSyncManager.kt's pullProduct for the same
+        // fix on Android.
+        if (rp.client_id !== localId && localProduct.cloudClientId !== rp.client_id) {
+          localProduct.cloudClientId = rp.client_id;
+          await putProduct(localProduct);
+        }
+        continue; // local wins, unchanged
+      }
 
       const remotePhotos = await cloudRest('GET', 'product_photos', undefined, {
         headers,
@@ -435,7 +489,13 @@ async function cloudPullAll(onProgress) {
 
       const product = {
         id: localId,
-        cloudClientId: localProduct?.cloudClientId,
+        // Whatever path found this row, this PC now knows its cloud
+        // identity: undefined when the local id already is that identity
+        // (the common case, and a brand new local row), otherwise the
+        // client_id itself -- including a match found only by content just
+        // now, so the next pull (or push) uses it directly instead of
+        // falling back again. Mirrors CloudSyncManager.kt's pullProduct.
+        cloudClientId: rp.client_id !== localId ? rp.client_id : localProduct?.cloudClientId,
         slug: localProduct?.slug || slugify(rp.brand, rp.name, localId),
         brand: rp.brand || '',
         name: rp.name || '',
