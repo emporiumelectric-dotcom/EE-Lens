@@ -43,6 +43,10 @@ function cloudPhotoPath(productId, photoId) {
   return `${productId}/${photoId}.jpg`;
 }
 
+// Photo bytes are bigger and slower than a plain REST call -- see
+// fetchWithTimeout (supabase.js) for why every request needs a bound at all.
+const CLOUD_PHOTO_TIMEOUT_MS = 60_000;
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function isValidUuid(value) {
@@ -132,7 +136,7 @@ async function cloudRest(method, table, body, { headers, query, prefer } = {}) {
   if (body !== undefined) requestHeaders['Content-Type'] = 'application/json';
   if (prefer) requestHeaders.Prefer = prefer;
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method,
     headers: requestHeaders,
     body: body !== undefined ? JSON.stringify(body) : undefined
@@ -148,16 +152,20 @@ async function cloudRest(method, table, body, { headers, query, prefer } = {}) {
 
 async function cloudUploadPhoto(productId, photo, headers) {
   const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_PHOTOS_BUCKET}/${cloudPhotoPath(productId, photo.id)}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      apikey: headers.apikey,
-      Authorization: headers.Authorization,
-      'Content-Type': 'image/jpeg',
-      'x-upsert': 'true'
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        apikey: headers.apikey,
+        Authorization: headers.Authorization,
+        'Content-Type': 'image/jpeg',
+        'x-upsert': 'true'
+      },
+      body: photo.blob
     },
-    body: photo.blob
-  });
+    CLOUD_PHOTO_TIMEOUT_MS
+  );
   if (!response.ok) {
     const text = await response.text().catch(() => '');
     throw new Error(`Photo upload failed (${response.status}): ${text || response.statusText}`);
@@ -172,9 +180,11 @@ async function cloudUploadPhoto(productId, photo, headers) {
  */
 async function cloudDownloadPhoto(storagePath, headers) {
   const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_PHOTOS_BUCKET}/${storagePath}`;
-  const response = await fetch(url, {
-    headers: { apikey: headers.apikey, Authorization: headers.Authorization }
-  });
+  const response = await fetchWithTimeout(
+    url,
+    { headers: { apikey: headers.apikey, Authorization: headers.Authorization } },
+    CLOUD_PHOTO_TIMEOUT_MS
+  );
   if (!response.ok) throw new Error(`Photo download failed (${response.status})`);
   return response.blob();
 }

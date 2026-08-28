@@ -16,6 +16,32 @@ const SESSION_KEY = 'ee-lens-session';
 let session = loadSession();
 const authListeners = [];
 
+/**
+ * How long a single request to Supabase gets before this gives up on it.
+ * Plain fetch() has no timeout of its own: a request that never gets a
+ * response -- whatever the cause -- hangs the returned promise forever,
+ * which is exactly what "Signing in..." spinning with no error looked
+ * like. AbortController turns that into an actual rejection so a caller's
+ * try/catch (trySignIn in app.js already has one) gets the chance to run.
+ */
+const FETCH_TIMEOUT_MS = 15_000;
+
+/** fetch() that rejects with a clear, user-facing message instead of hanging forever. */
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error("Couldn't reach the server, try again.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function loadSession() {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
@@ -45,7 +71,7 @@ function isSignedIn() {
 }
 
 async function signIn(email, password) {
-  const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+  const response = await fetchWithTimeout(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
     method: 'POST',
     headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password })
@@ -68,7 +94,7 @@ async function signOut() {
   saveSession(null);
   if (!token) return;
   try {
-    await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
+    await fetchWithTimeout(`${SUPABASE_URL}/auth/v1/logout`, {
       method: 'POST',
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}` }
     });
@@ -83,7 +109,7 @@ async function ensureFreshSession() {
   const expiringSoon = !session.expires_at || session.expires_at * 1000 < Date.now() + 60_000;
   if (!expiringSoon) return session;
   try {
-    const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    const response = await fetchWithTimeout(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
       method: 'POST',
       headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: session.refresh_token })
