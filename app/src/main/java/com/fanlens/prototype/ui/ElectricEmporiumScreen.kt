@@ -43,10 +43,15 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -82,6 +87,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.fanlens.prototype.BuildConfig
 import com.fanlens.prototype.R
 import com.fanlens.prototype.data.CatalogRepository
+import com.fanlens.prototype.model.CategoryTaxonomy
 import com.fanlens.prototype.model.MatchSource
 import com.fanlens.prototype.model.Product
 import com.fanlens.prototype.model.ProductDetection
@@ -107,6 +113,27 @@ private fun productCountLabel(count: Int): String = when (count) {
     1 -> "1 product saved on this device"
     else -> "$count products saved on this device"
 }
+
+/**
+ * Only the products matching [category] (case-insensitive), or every one of
+ * [products] when [category] is blank ("All categories"). Pure and
+ * dependency-free so this is unit-testable on its own; see
+ * ElectricEmporiumScreenTest. Mirrors pc-catalogue-manager/app.js's matches().
+ */
+internal fun filterProductsByCategory(products: List<Product>, category: String): List<Product> {
+    val wanted = category.trim()
+    if (wanted.isBlank()) return products
+    return products.filter { it.category?.trim()?.equals(wanted, ignoreCase = true) == true }
+}
+
+/**
+ * "N products" with nothing filtered; "X of Y products" once a category
+ * filter has actually narrowed the list. Mirrors pc-catalogue-manager's
+ * #stats indicator (see refreshStats in app.js).
+ */
+internal fun productListCountLabel(shown: Int, total: Int): String =
+    if (shown == total) "$total ${if (total == 1) "product" else "products"}"
+    else "$shown of $total products"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -820,6 +847,7 @@ private fun EeAppTab(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EeProductCatalogue(
     products: List<Product>,
@@ -836,8 +864,25 @@ private fun EeProductCatalogue(
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
+    // Which shelf to show, "" meaning every product -- purely a view over
+    // [products], never persisted; clearing it (or reopening the tab) always
+    // goes back to seeing everything.
+    var categoryFilter by remember { mutableStateOf("") }
+    // Same option-building rule as ProductEditScreen's CategoryField: the
+    // standard list plus whatever custom categories are actually in use, so
+    // a product filed under something outside CategoryTaxonomy can still be
+    // filtered to, not just picked at edit time.
+    val categoryOptions = remember(products) {
+        (CategoryTaxonomy.STANDARD_CATEGORIES + products.mapNotNull { it.category?.trim()?.takeIf(String::isNotEmpty) })
+            .distinctBy { it.lowercase() }
+            .sortedBy { it.lowercase() }
+    }
+    val filteredProducts = remember(products, categoryFilter) { filterProductsByCategory(products, categoryFilter) }
+
     // The list this is checked against can change out from under it (a pull-to-
     // refresh, a cloud pull on the Backup tab) -- drop anything no longer here.
+    // Checked against every product, not just the filtered view: changing the
+    // category filter must never silently drop a selection made before it.
     LaunchedEffect(products) {
         val liveIds = products.mapTo(mutableSetOf()) { it.id }
         val pruned = selectedIds.filterTo(mutableSetOf()) { it in liveIds }
@@ -897,6 +942,8 @@ private fun EeProductCatalogue(
                         Text(
                             text = if (products.isEmpty()) {
                                 "No products yet. Tap Add product to create the first one."
+                            } else if (categoryFilter.isNotBlank() && filteredProducts.isEmpty()) {
+                                "No products in “$categoryFilter” yet."
                             } else if (selectionMode) {
                                 "Tap products to select them, or press and hold to start."
                             } else {
@@ -904,6 +951,14 @@ private fun EeProductCatalogue(
                             },
                             color = FanLensColors.InkMuted
                         )
+                        if (products.isNotEmpty() && !selectionMode) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = productListCountLabel(filteredProducts.size, products.size),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = FanLensColors.InkMuted
+                            )
+                        }
                     }
                     if (!selectionMode && products.isNotEmpty()) {
                         TextButton(onClick = { selectionMode = true }) {
@@ -911,10 +966,18 @@ private fun EeProductCatalogue(
                         }
                     }
                 }
+                if (products.isNotEmpty() && !selectionMode) {
+                    Spacer(Modifier.height(12.dp))
+                    EeCategoryFilterField(
+                        options = categoryOptions,
+                        selected = categoryFilter,
+                        onSelect = { categoryFilter = it }
+                    )
+                }
                 Spacer(Modifier.height(20.dp))
             }
 
-            items(products, key = { it.id }) { product ->
+            items(filteredProducts, key = { it.id }) { product ->
                 EeProductRow(
                     product = product,
                     repository = repository,
@@ -951,6 +1014,49 @@ private fun EeProductCatalogue(
             }
         }
       }
+    }
+}
+
+/**
+ * Filters the Products list to one shelf at a time. "All categories" plus
+ * whatever CategoryTaxonomy.STANDARD_CATEGORIES and the catalogue's own
+ * products actually use, same option-building rule as ProductEditScreen's
+ * CategoryField -- but read-only, no "Other…"/free-text mode, since this
+ * only ever narrows an existing list, never assigns a category to anything.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EeCategoryFilterField(options: List<String>, selected: String, onSelect: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = selected.ifBlank { "All categories" },
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Category") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("All categories") },
+                onClick = {
+                    onSelect("")
+                    expanded = false
+                }
+            )
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        onSelect(option)
+                        expanded = false
+                    }
+                )
+            }
+        }
     }
 }
 
