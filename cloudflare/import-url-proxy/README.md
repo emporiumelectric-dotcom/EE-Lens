@@ -15,13 +15,18 @@ One Worker answers both jobs: `/?url=...` for a page, `/image?url=...` for
 an image. Deploying is the one step below either way -- there's nothing
 extra to set up for images specifically.
 
-**Known gap:** the candidate-image thumbnails shown while reviewing an
-import load as plain `<img src>` tags, which can't carry the optional
-`PROXY_SHARED_SECRET` header. If you've set that secret, those thumbnails
-won't load on the hosted site (they'll show as broken images) -- but
-"Approve and save" still downloads the actual images correctly, since that
-step goes through a real `fetch()` call that does send the header. Leaving
-the secret unset (the default) avoids this entirely.
+**Fixed, but worth knowing:** the candidate-image thumbnails shown while
+reviewing an import used to load as plain `<img src>` tags pointed at this
+Worker's `/image` route. That silently 403'd every single one on the hosted
+site: a bare `<img>` load never sends an `Origin` header, only a `Referer`,
+and under the browser's default `strict-origin-when-cross-origin` policy
+that `Referer` is origin-only (no path) for any cross-origin request --
+which this Worker's access check (`Origin`, or a *path-qualified* `Referer`)
+didn't accept. `import-url.js`/`app.js` now load thumbnails through
+`fetchImageUrl()` (a real `fetch()` call, same function that downloads the
+image for real at approve time) instead, which sends `Origin` reliably.
+This also means the optional `PROXY_SHARED_SECRET` header now reaches
+thumbnail requests too, not just the approve-time download.
 
 ## Cost
 

@@ -164,10 +164,23 @@ function extractSpecs(doc) {
   return specs;
 }
 
+/**
+ * Reads the first usable number out of each candidate in turn.
+ *
+ * Extracts the first digit-led run ("3180.0" out of "Rs.3180.0"), rather
+ * than stripping every non-digit character and parsing what's left: that
+ * naive approach turns "Rs.3180.0" into ".3180.0" -- the abbreviation's own
+ * period lands directly against the digits, and parseFloat reads that as
+ * 0.318 (stopping at the second period), not 3180. Matching a real number
+ * token instead means an "Rs." prefix (or "₹", "MRP:", anything else that
+ * isn't itself a digit) is simply skipped, never welded onto the value.
+ */
 function firstNumber(...candidates) {
   for (const candidate of candidates) {
     if (candidate == null || candidate === '') continue;
-    const numeric = Number.parseFloat(String(candidate).replace(/[^0-9.]/g, ''));
+    const match = String(candidate).match(/\d[\d,]*(?:\.\d+)?/);
+    if (!match) continue;
+    const numeric = Number.parseFloat(match[0].replace(/,/g, ''));
     if (Number.isFinite(numeric) && numeric > 0) return Math.round(numeric * 100);
   }
   return null;
@@ -209,16 +222,36 @@ function extractMrpMinor(doc, product) {
  * never spell out the word "MRP" anywhere; the labelled-text patterns catch
  * everything else. Never a guess at what MRP *should* be -- only ever reads
  * a number the page itself already presents as the original/list price.
+ *
+ * A real, permanent gap this cannot close: a page that shows its MRP only as
+ * a struck-through price styled by an *external* stylesheet through a
+ * hashed, non-semantic class name (React CSS Modules and similar -- common
+ * on large sites, Flipkart included), with no semantic <del>/<s> tag, no
+ * inline style, and no textual "MRP"/"list price" label anywhere, cannot be
+ * told apart from any other number on the page by reading its HTML alone.
+ * DOMParser never fetches or applies stylesheets, so "this text is struck
+ * through" is only visible here when the page's own markup says so directly
+ * -- a semantic tag, an inline style, or a class name that names itself.
+ * There is no fix for that short of rendering the page in a real browser
+ * (Playwright/Puppeteer) and reading computed styles, which is a materially
+ * different, heavier tool than this file.
  */
 function mrpFromText(doc) {
-  for (const el of doc.querySelectorAll('del, s, strike, [class*="strike" i], [class*="mrp" i]')) {
+  const strikethroughSelector = [
+    'del', 's', 'strike',
+    '[style*="line-through" i]',
+    '[class*="strike" i]', '[class*="mrp" i]', '[class*="line-through" i]',
+    '[class*="list-price" i]', '[class*="old-price" i]', '[class*="was-price" i]', '[class*="original-price" i]'
+  ].join(', ');
+  for (const el of doc.querySelectorAll(strikethroughSelector)) {
     const found = firstNumber(textOf(el));
     if (found) return found;
   }
   const text = textOf(doc.body);
   const labelled =
     text.match(/\bm\.?\s?r\.?\s?p\.?\s*[:.]?\s*(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d+)?)/i) ||
-    text.match(/\b(?:list|original)\s+price\s*[:.]?\s*(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d+)?)/i);
+    text.match(/\b(?:list|original)\s+price\s*[:.]?\s*(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d+)?)/i) ||
+    text.match(/\bwas\s*[:.]?\s*(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d+)?)/i);
   return labelled ? firstNumber(labelled[1]) : null;
 }
 
