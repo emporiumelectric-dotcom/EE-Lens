@@ -109,6 +109,40 @@ new contents into the same Worker's editor and Deploy) or re-run
 `wrangler deploy` from the CLI -- either updates the same URL in place, no
 new setup needed.
 
+## Known limitation: some sites' bot-detection will block this Worker outright
+
+Flipkart, tested for real, returns its "Are you a human?" verification page
+through this Worker instead of the real product page -- while the exact
+same URL works correctly through `server.py`'s local helper.
+
+Investigated before assuming a fix: compared the two requests header for
+header. They already matched almost exactly (same `User-Agent`, same
+`Accept`); the one real gap (`Accept-Language`, which `server.py` sent and
+this Worker didn't) is now fixed, sending both requests down effectively
+identical headers. That headers were already this close, yet only one side
+is blocked, is itself the finding: this isn't a header problem. Cloudflare
+Workers make outbound requests from Cloudflare's own shared datacenter IP
+ranges, which large sites' bot-detection systems (Akamai, PerimeterX/HUMAN,
+DataDome, and platforms' own in-house systems) specifically fingerprint and
+block, independent of what headers say -- likely including the TLS/HTTP
+handshake shape itself, a layer no header set in a Worker's `fetch()` call
+can touch. `server.py`'s request, by contrast, leaves from the shop's own
+ordinary PC connection, which looks like a normal shopper.
+
+**This is very likely not fixable from inside this Worker.** A materially
+different approach -- Cloudflare's separate Browser Rendering product, an
+actual headless-Chrome-in-the-cloud service with a real browser's
+fingerprint -- might fare better against fingerprint-based detection
+specifically, but it still runs from Cloudflare's network (so may not
+escape IP-based blocking either) and is a heavier, differently-priced tool
+than this. Not attempted here. For a site that blocks datacenter traffic
+like this, `server.py` (via `EE Lens Manager.bat`) remains the reliable
+path -- which is exactly the job it's already there for. See `worker.js`'s
+own comment above its `USER_AGENT` constant for the full writeup, including
+why the User-Agent itself was deliberately left as the honest,
+self-identifying string it already was rather than swapped for a fake
+browser UA to try to look less like a known tool.
+
 ## Known limitation, worth a real review before this is trusted further
 
 `worker.js`'s `refusalFor()` blocks obviously-private hostnames

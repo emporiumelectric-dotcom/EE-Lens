@@ -27,6 +27,50 @@ const DEFAULT_ALLOWED_ORIGIN = 'https://lens.electricemporium.in';
 const MAX_PAGE_BYTES = 4 * 1024 * 1024; // matches server.py's own MAX_PAGE_BYTES
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // matches server.py's own MAX_IMAGE_BYTES
 const FETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * Investigated, not guessed: a real product page on Flipkart returned its
+ * "Are you a human?" verification page through this Worker, while the exact
+ * same URL works through server.py's local helper. Before touching
+ * anything, compared what each side actually sends -- and they already
+ * matched: server.py's handle_page and this file send the identical
+ * User-Agent string below, and (until this comment's own fix, just below)
+ * differed only in server.py also sending Accept-Language, which this file
+ * now sends too. That headers were already this close, yet one path is
+ * blocked and the other isn't, is itself the evidence: it points away from
+ * headers and toward *where the request comes from*, not what it says.
+ *
+ * Cloudflare Workers make outbound requests from Cloudflare's own shared
+ * datacenter IP ranges -- well-known, heavily-trafficked, and specifically
+ * fingerprinted and blocked by large sites' bot-detection systems (Akamai,
+ * PerimeterX/HUMAN, DataDome, and large e-commerce platforms' own in-house
+ * systems all do this), independent of any header content. server.py's
+ * request instead leaves from whatever ordinary residential/business IP the
+ * shop's own PC is on, which looks like a normal shopper and isn't
+ * challenged. This also likely includes TLS/HTTP fingerprinting (JA3/JA4
+ * handshake shape, ALPN/HTTP-version negotiation) that Cloudflare's network
+ * stack presents and that no header set in this fetch() call can change --
+ * that layer sits below anything JavaScript here controls.
+ *
+ * Net finding: this is very likely not fixable by adjusting headers sent
+ * from *this* Worker, because it is not primarily a header problem. A
+ * materially different approach -- e.g. Cloudflare's separate Browser
+ * Rendering product, an actual headless-Chrome-in-the-cloud service, which
+ * presents a real browser's TLS/JS fingerprint -- might fare better against
+ * fingerprint-based detection specifically, but still runs from Cloudflare's
+ * network and is a heavier, differently-priced tool than a plain fetch()
+ * Worker; not attempted here. For a site that blocks datacenter traffic like
+ * this, the shop's own local helper (server.py, via "EE Lens Manager.bat")
+ * remains the reliable path -- which is exactly what it's already for.
+ *
+ * The User-Agent itself is left as the honest, self-identifying string
+ * below (matching server.py) rather than swapped for a fake full browser UA
+ * string: the evidence above suggests UA content was never the actual
+ * blocker (server.py sends this same minimal string and isn't blocked), and
+ * impersonating a real browser to look less like an identified tool is a
+ * different, more evasive move than this fetcher's stated job -- reading a
+ * public page's own markup, not disguising who's asking.
+ */
 const USER_AGENT = 'Mozilla/5.0 (EE Lens Catalogue Manager)';
 
 function corsHeaders(allowedOrigin) {
@@ -111,7 +155,17 @@ async function handlePage(target, allowedOrigin) {
   try {
     upstream = await fetchWithTimeout(
       target,
-      { headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' } },
+      {
+        headers: {
+          'User-Agent': USER_AGENT,
+          Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+          // server.py's own handle_page sends this too; this Worker didn't,
+          // which was a real, fixable gap -- but see the comment on
+          // USER_AGENT above for why this alone won't get past a site that
+          // blocks on where the request comes from, not what it says.
+          'Accept-Language': 'en-IN,en;q=0.9'
+        }
+      },
       FETCH_TIMEOUT_MS
     );
   } catch (error) {
