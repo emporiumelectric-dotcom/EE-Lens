@@ -751,8 +751,16 @@ function sizeOptionsFor(category) {
 /**
  * Builds a category dropdown from the standard list plus anything already used,
  * with "Other" revealing a text box so a new kind of product is never blocked.
+ *
+ * [allowOther] is false for the URL-import review screen: a parsed category
+ * that doesn't match anything known is a guess off a scraped page, not
+ * something the owner typed, so it must never be offered as free text --
+ * that is exactly how the catalogue ends up with "exhaust_fan" sitting next
+ * to "Exhaust Fans" as two different shelves. There the field just falls
+ * back to "— none —" and the owner picks from the real list. Manual editing
+ * keeps "Other…" (the default) so a genuinely new category is never blocked.
  */
-function fillCategorySelect(select, textInput, value) {
+function fillCategorySelect(select, textInput, value, { allowOther = true } = {}) {
   const used = knownCategories();
   const all = [...new Set([...STANDARD_CATEGORIES, ...used])]
     .sort((a, b) => a.localeCompare(b));
@@ -766,12 +774,14 @@ function fillCategorySelect(select, textInput, value) {
     option.value = name; option.textContent = name;
     select.append(option);
   }
-  const other = document.createElement('option');
-  other.value = '__other__'; other.textContent = 'Other…';
-  select.append(other);
+  if (allowOther) {
+    const other = document.createElement('option');
+    other.value = '__other__'; other.textContent = 'Other…';
+    select.append(other);
+  }
 
   const known = all.some((n) => n.toLowerCase() === (value || '').toLowerCase());
-  if (value && !known) {
+  if (value && !known && allowOther) {
     select.value = '__other__';
     textInput.hidden = false;
     textInput.value = value;
@@ -964,7 +974,7 @@ function renderCandidate() {
   $('u-brand').value = c.brand;
   $('u-name').value = c.name;
   $('u-model').value = c.model;
-  fillCategorySelect($('u-category-select'), $('u-category'), c.category || '');
+  fillCategorySelect($('u-category-select'), $('u-category'), c.category || '', { allowOther: false });
   refreshSizeOptions(c.category || '');
   $('u-colour').value = c.colour;
   $('u-sweep').value = c.sizeSweepMm ?? '';
@@ -1029,7 +1039,13 @@ function renderCandidate() {
     tile.dataset.src = src;
 
     const img = document.createElement('img');
-    img.src = `/fetch?url=${encodeURIComponent(src)}`;
+    // A plain <img src> can't carry the optional proxy-secret header
+    // fetchImageUrl sends, so this only loads without a hitch when no
+    // CLOUD_FETCH_PROXY_SECRET is set (the default). With one set, a
+    // candidate can show as unloadable here even though "Approve and save"
+    // -- which downloads through fetchImageUrl itself -- would still fetch
+    // it fine; see cloudflare/import-url-proxy/README.md.
+    img.src = fetchImageProxyEndpoint(src);
     img.alt = '';
     img.loading = 'lazy';
     // A link that will not load is not a candidate; drop it quietly.

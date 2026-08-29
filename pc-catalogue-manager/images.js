@@ -88,9 +88,13 @@ async function prepare(fileOrBlob) {
 /**
  * Fetches an image the owner pasted a link to.
  *
- * Tries the browser directly first. Most image hosts do not send CORS headers,
- * so that usually fails when the page is opened straight from disk; when the
- * local launcher is running, its /fetch endpoint does the download instead.
+ * Tries the browser directly first. Most image hosts do not send CORS
+ * headers, so that usually fails; the fallback then goes through whichever
+ * fetcher answers where this is running -- server.py's local /fetch route
+ * on 127.0.0.1 (the "EE Lens Manager.bat" workflow), or the hosted
+ * Cloudflare Worker's /image route anywhere else, including
+ * lens.electricemporium.in. See fetchImageProxyEndpoint() in import-url.js,
+ * which both this and the candidate-image preview in app.js call into.
  */
 async function fetchImageUrl(url) {
   const clean = url.trim();
@@ -105,11 +109,19 @@ async function fetchImageUrl(url) {
       if (blob.type.startsWith('image/')) return blob;
     }
   } catch {
-    /* expected for most hosts; fall through to the local helper */
+    /* expected for most hosts; fall through to the proxy */
+  }
+
+  if (!isLocalHelperHost() && !CLOUD_FETCH_PROXY_URL) {
+    throw new Error(`${noFetcherMessage()} Or save the image and drag it in instead.`);
   }
 
   try {
-    const viaHelper = await fetch(`/fetch?url=${encodeURIComponent(clean)}`);
+    const viaHelper = await fetch(fetchImageProxyEndpoint(clean), {
+      headers: CLOUD_FETCH_PROXY_SECRET && !isLocalHelperHost()
+        ? { 'X-Ee-Lens-Proxy-Key': CLOUD_FETCH_PROXY_SECRET }
+        : undefined
+    });
     if (viaHelper.ok) {
       const blob = await viaHelper.blob();
       if (blob.type.startsWith('image/')) return blob;
@@ -118,9 +130,11 @@ async function fetchImageUrl(url) {
     throw new Error(await viaHelper.text());
   } catch (error) {
     throw new Error(
-      `${error.message || 'That image could not be downloaded.'} ` +
-        'Start the manager with "EE Lens Manager.bat" to download links, ' +
-        'or save the image and drag it in instead.'
+      isLocalHelperHost()
+        ? `${error.message || 'That image could not be downloaded.'} ` +
+          'Start the manager with "EE Lens Manager.bat" to download links, ' +
+          'or save the image and drag it in instead.'
+        : `${error.message || 'That image could not be downloaded.'} Save the image and drag it in instead.`
     );
   }
 }

@@ -1,13 +1,27 @@
 # Import-from-URL fetch proxy
 
 Lets "Import from product URL" work on `lens.electricemporium.in` (GitHub
-Pages has no backend of its own), by fetching the page server-side on
-Cloudflare and handing its HTML back to the browser -- the same job
-`server.py`'s `/page?` route already does when the Catalogue Manager is
-opened locally via `EE Lens Manager.bat`. `import-url.js` picks whichever
-one to call automatically; neither this file nor `server.py` needed to
-change to make that work. See `worker.js`'s header comment for the design,
-and `import-url.js`'s `fetchProxyEndpoint()` for the client side.
+Pages has no backend of its own), by fetching the page -- and, separately,
+each of its images -- server-side on Cloudflare and handing them back to the
+browser. That's the same job `server.py`'s `/page?` and `/fetch?` routes
+already do when the Catalogue Manager is opened locally via `EE Lens
+Manager.bat`. `import-url.js` and `images.js` pick whichever one to call
+automatically; neither this file nor `server.py` needed to change to make
+that work. See `worker.js`'s header comment for the design, and
+`import-url.js`'s `fetchProxyEndpoint()`/`fetchImageProxyEndpoint()` for the
+client side.
+
+One Worker answers both jobs: `/?url=...` for a page, `/image?url=...` for
+an image. Deploying is the one step below either way -- there's nothing
+extra to set up for images specifically.
+
+**Known gap:** the candidate-image thumbnails shown while reviewing an
+import load as plain `<img src>` tags, which can't carry the optional
+`PROXY_SHARED_SECRET` header. If you've set that secret, those thumbnails
+won't load on the hosted site (they'll show as broken images) -- but
+"Approve and save" still downloads the actual images correctly, since that
+step goes through a real `fetch()` call that does send the header. Leaving
+the secret unset (the default) avoids this entirely.
 
 ## Cost
 
