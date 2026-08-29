@@ -92,10 +92,19 @@ function installFailSafes() {
   );
 }
 
-async function refreshStats() {
+/**
+ * [shownCount] is how many products the current category/search filter
+ * leaves visible; omit it (or pass null) when nothing is filtered, or when
+ * the caller has no filtered list at hand. Shown as "X of Y products" only
+ * while a filter is actually narrowing the list -- the plain total the rest
+ * of the time, so an unfiltered catalogue never reads like a filter is on.
+ */
+async function refreshStats(shownCount = null) {
   const c = await counts();
   const mb = (c.bytes / (1024 * 1024)).toFixed(1);
-  $('stats').textContent = `${c.products} products · ${c.photos} photos · ${mb} MB`;
+  const filtered = shownCount != null && (categoryFilter || filter.trim()) && shownCount !== c.products;
+  const productsLabel = filtered ? `${shownCount} of ${c.products} products` : `${c.products} products`;
+  $('stats').textContent = `${productsLabel} · ${c.photos} photos · ${mb} MB`;
 }
 
 /* ---------- product list ---------- */
@@ -220,7 +229,7 @@ async function renderList() {
     : categoryFilter
       ? `No products in "${categoryFilter}" match that search.`
       : 'No products match that search.';
-  await refreshStats();
+  await refreshStats(shown.length);
 }
 
 /* ---------- editor ---------- */
