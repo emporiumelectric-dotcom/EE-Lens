@@ -8,17 +8,24 @@
  * fetchProductPage() doesn't need to know or care which one answered --
  * see that file's fetchProxyEndpoint().
  *
+ * Also answers /image?url=... the same way server.py's own /fetch route
+ * does: downloads the image server-side and hands back the raw bytes,
+ * since a browser can't do that itself for any image host that doesn't
+ * send CORS headers (most of them) -- see fetchImageProxyEndpoint() in
+ * import-url.js and fetchImageUrl() in images.js.
+ *
  * Restricted to requests that plausibly come from the Catalogue Manager
  * itself: an Origin/Referer check against ALLOWED_ORIGIN, plus an optional
  * shared secret (env.PROXY_SHARED_SECRET, unset by default) for extra
  * hardening once deployed. This is a reasonable bar for a small internal
  * tool -- not a substitute for a real security review before this is
  * trusted with anything beyond what it does today: reading a public page
- * and returning its markup.
+ * or image and returning it.
  */
 
 const DEFAULT_ALLOWED_ORIGIN = 'https://lens.electricemporium.in';
 const MAX_PAGE_BYTES = 4 * 1024 * 1024; // matches server.py's own MAX_PAGE_BYTES
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // matches server.py's own MAX_IMAGE_BYTES
 const FETCH_TIMEOUT_MS = 20_000;
 const USER_AGENT = 'Mozilla/5.0 (EE Lens Catalogue Manager)';
 
@@ -98,6 +105,91 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
+/** GET /?url=... -- the page-fetch job, returning {finalUrl, html}. */
+async function handlePage(target, allowedOrigin) {
+  let upstream;
+  try {
+    upstream = await fetchWithTimeout(
+      target,
+      { headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' } },
+      FETCH_TIMEOUT_MS
+    );
+  } catch (error) {
+    const timedOut = error.name === 'AbortError';
+    return textResponse(
+      502,
+      timedOut ? 'That page took too long to answer.' : `That page could not be opened: ${error.message}`,
+      allowedOrigin
+    );
+  }
+
+  const contentType = upstream.headers.get('content-type') || '';
+  if (!contentType.includes('html') && !contentType.includes('xml')) {
+    return textResponse(415, 'That link is not a product page.', allowedOrigin);
+  }
+
+  const buffer = await upstream.arrayBuffer();
+  if (buffer.byteLength > MAX_PAGE_BYTES) {
+    return textResponse(413, 'That page is larger than this fetcher will read.', allowedOrigin);
+  }
+
+  let charset = 'utf-8';
+  const charsetMatch = contentType.match(/charset=([^;]+)/i);
+  if (charsetMatch) charset = charsetMatch[1].trim();
+  let html;
+  try {
+    html = new TextDecoder(charset).decode(buffer);
+  } catch {
+    html = new TextDecoder('utf-8').decode(buffer); // an unrecognised charset name -- read as UTF-8 rather than fail outright
+  }
+
+  return jsonResponse({ finalUrl: upstream.url, html }, allowedOrigin);
+}
+
+/**
+ * GET /image?url=... -- downloads an image link the browser itself can't,
+ * for the same reason it can't read the page: most image hosts don't send
+ * CORS headers either. Mirrors server.py's own /fetch route: same checks,
+ * same failure wording, so import-url.js's callers don't need to know which
+ * one answered.
+ */
+async function handleImage(target, allowedOrigin) {
+  let upstream;
+  try {
+    upstream = await fetchWithTimeout(
+      target,
+      { headers: { 'User-Agent': USER_AGENT, Accept: 'image/*,*/*;q=0.8' } },
+      FETCH_TIMEOUT_MS
+    );
+  } catch (error) {
+    const timedOut = error.name === 'AbortError';
+    return textResponse(
+      502,
+      timedOut ? 'That image took too long to download.' : `Could not download that image: ${error.message}`,
+      allowedOrigin
+    );
+  }
+
+  if (!upstream.ok) {
+    return textResponse(502, `Could not download that image (HTTP ${upstream.status}).`, allowedOrigin);
+  }
+
+  const contentType = upstream.headers.get('content-type') || '';
+  if (!contentType.startsWith('image/')) {
+    return textResponse(415, 'That link did not return an image.', allowedOrigin);
+  }
+
+  const buffer = await upstream.arrayBuffer();
+  if (buffer.byteLength > MAX_IMAGE_BYTES) {
+    return textResponse(413, 'That image is larger than 25 MB.', allowedOrigin);
+  }
+
+  return new Response(buffer, {
+    status: 200,
+    headers: { 'Content-Type': contentType, 'Cache-Control': 'no-store', ...corsHeaders(allowedOrigin) }
+  });
+}
+
 export default {
   async fetch(request, env) {
     const allowedOrigin = env.ALLOWED_ORIGIN || DEFAULT_ALLOWED_ORIGIN;
@@ -126,46 +218,13 @@ export default {
       }
     }
 
-    const target = new URL(request.url).searchParams.get('url') || '';
+    const url = new URL(request.url);
+    const target = url.searchParams.get('url') || '';
     const refusal = refusalFor(target);
     if (refusal) return textResponse(400, refusal, allowedOrigin);
 
-    let upstream;
-    try {
-      upstream = await fetchWithTimeout(
-        target,
-        { headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' } },
-        FETCH_TIMEOUT_MS
-      );
-    } catch (error) {
-      const timedOut = error.name === 'AbortError';
-      return textResponse(
-        502,
-        timedOut ? 'That page took too long to answer.' : `That page could not be opened: ${error.message}`,
-        allowedOrigin
-      );
-    }
-
-    const contentType = upstream.headers.get('content-type') || '';
-    if (!contentType.includes('html') && !contentType.includes('xml')) {
-      return textResponse(415, 'That link is not a product page.', allowedOrigin);
-    }
-
-    const buffer = await upstream.arrayBuffer();
-    if (buffer.byteLength > MAX_PAGE_BYTES) {
-      return textResponse(413, 'That page is larger than this fetcher will read.', allowedOrigin);
-    }
-
-    let charset = 'utf-8';
-    const charsetMatch = contentType.match(/charset=([^;]+)/i);
-    if (charsetMatch) charset = charsetMatch[1].trim();
-    let html;
-    try {
-      html = new TextDecoder(charset).decode(buffer);
-    } catch {
-      html = new TextDecoder('utf-8').decode(buffer); // an unrecognised charset name -- read as UTF-8 rather than fail outright
-    }
-
-    return jsonResponse({ finalUrl: upstream.url, html }, allowedOrigin);
+    return url.pathname === '/image'
+      ? handleImage(target, allowedOrigin)
+      : handlePage(target, allowedOrigin);
   }
 };
