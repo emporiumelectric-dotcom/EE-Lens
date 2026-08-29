@@ -22,3 +22,17 @@ const SUPABASE_SCHEMA = 'ee_lens';
 
 // Private Storage bucket holding product photos synced to the cloud.
 const SUPABASE_PHOTOS_BUCKET = 'ee-lens-photos';
+
+/*
+ * "Import from product URL" needs something to fetch an external page on
+ * this tool's behalf -- the browser cannot do it directly for a site that
+ * doesn't grant CORS permission (see import-url.js's fetchProductPage). The
+ * local helper (server.py, started by "EE Lens Manager.bat") only ever
+ * listens on this same PC, so it only exists -- and is only used -- when
+ * this page itself was opened from 127.0.0.1/localhost. Anywhere else
+ * (lens.electricemporium.in included, a GitHub Pages site with no backend
+ * of its own) the import goes to this Cloudflare Worker instead. See
+ * cloudflare/import-url-proxy/README.md for what to deploy and paste here.
+ */
+const CLOUD_FETCH_PROXY_URL = ''; // e.g. 'https://ee-lens-import-proxy.YOUR-SUBDOMAIN.workers.dev'
+const CLOUD_FETCH_PROXY_SECRET = ''; // only needed if the Worker's PROXY_SHARED_SECRET is set

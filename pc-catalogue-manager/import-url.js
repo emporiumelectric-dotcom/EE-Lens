@@ -11,22 +11,66 @@
 const IMAGE_NOISE = /(logo|icon|sprite|placeholder|banner|thumb_?nail_?blank|1x1|pixel|badge|payment|footer|header)/i;
 const MAX_IMAGE_CANDIDATES = 14;
 
-/** Downloads a page through the local helper, which the browser cannot do itself. */
+/**
+ * server.py's local helper only ever listens on this same PC, so it exists
+ * -- and is worth trying -- only when this page was itself opened from
+ * 127.0.0.1/localhost (the "EE Lens Manager.bat" workflow). Anywhere else,
+ * including lens.electricemporium.in, it does not exist and never will;
+ * the hosted Cloudflare Worker (CLOUD_FETCH_PROXY_URL, from config.js)
+ * answers the same job there instead.
+ *
+ * [hostname] defaults to the real page's own -- overridable only so this is
+ * unit-testable against a hostname this test server can't actually be
+ * reached at; every real call site leaves it to the default.
+ */
+function isLocalHelperHost(hostname = location.hostname) {
+  return hostname === '127.0.0.1' || hostname === 'localhost';
+}
+
+function fetchProxyEndpoint(url, hostname = location.hostname) {
+  const base = isLocalHelperHost(hostname) ? '/page' : CLOUD_FETCH_PROXY_URL;
+  return `${base}?url=${encodeURIComponent(url)}`;
+}
+
+function noFetcherMessage(hostname = location.hostname) {
+  return isLocalHelperHost(hostname)
+    ? 'Importing a link needs the local helper. Start the manager with "EE Lens Manager.bat", or enter the product by hand.'
+    : "Couldn't reach the fetch service, try again -- or enter the product by hand.";
+}
+
+/** Downloads a page through whichever fetcher answers where this is running -- see fetchProxyEndpoint. */
 async function fetchProductPage(url) {
   const clean = url.trim();
   if (!/^https?:\/\//i.test(clean)) {
     throw new Error('Paste a link that starts with http:// or https://');
   }
+  if (!isLocalHelperHost() && !CLOUD_FETCH_PROXY_URL) {
+    throw new Error(noFetcherMessage());
+  }
+
   let response;
   try {
-    response = await fetch(`/page?url=${encodeURIComponent(clean)}`);
+    response = await fetch(fetchProxyEndpoint(clean), {
+      headers: CLOUD_FETCH_PROXY_SECRET && !isLocalHelperHost()
+        ? { 'X-Ee-Lens-Proxy-Key': CLOUD_FETCH_PROXY_SECRET }
+        : undefined
+    });
   } catch {
-    throw new Error(
-      'Importing from a link needs the local helper. Start the manager with ' +
-      '"EE Lens Manager.bat", or enter the product by hand.'
-    );
+    throw new Error(noFetcherMessage());
   }
-  if (!response.ok) throw new Error(await response.text());
+
+  if (!response.ok) {
+    // Both fetchers (server.py's /page? route and the Worker) always
+    // answer their own failures as plain text -- a message meant to be
+    // read, never someone else's page. Anything else slipping through
+    // (e.g. text/html) is a static host's own error page underneath, not
+    // ours to show: lens.electricemporium.in has no backend of its own, so
+    // a wrong or unreachable proxy URL 404s against GitHub Pages instead,
+    // and that response body is GitHub's HTML, not a message for this box.
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/plain')) throw new Error(await response.text());
+    throw new Error(noFetcherMessage());
+  }
   return response.json();
 }
 
