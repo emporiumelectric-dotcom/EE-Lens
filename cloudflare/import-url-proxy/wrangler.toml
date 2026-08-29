@@ -1,0 +1,18 @@
+# Deploys this Worker to Cloudflare's free tier under
+# ee-lens-import-proxy.<your-subdomain>.workers.dev -- see this folder's
+# README.md for the one-time setup and the exact URL to note down afterwards.
+
+name = "ee-lens-import-proxy"
+main = "worker.js"
+compatibility_date = "2026-08-29"
+
+[vars]
+# The only origin this Worker answers. Change this if the Catalogue
+# Manager is ever served from a different domain.
+ALLOWED_ORIGIN = "https://lens.electricemporium.in"
+
+# Optional extra hardening beyond the Origin/Referer check: set with
+#   wrangler secret put PROXY_SHARED_SECRET
+# (or Workers & Pages > ee-lens-import-proxy > Settings > Variables in the
+# dashboard, added as a secret, not a plaintext var). Leave unset to rely on
+# the Origin/Referer check alone -- see README.md.
