@@ -1,10 +1,13 @@
 package com.fanlens.prototype.supabase
 
 import com.fanlens.prototype.data.db.entity.ProductEntity
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -148,5 +151,39 @@ class CloudSyncManagerTest {
         val local = product(id = "havells-enticer-vineer", brand = "", name = "")
 
         assertNull(selectPullMatch(remoteUuid, "", "", "", listOf(local)))
+    }
+
+    // ---------------- isDeletedRow / pullAll's two-pass ordering ----------------
+
+    private fun remoteRow(deletedAt: String? = null) = JSONObject().apply {
+        put("deleted_at", deletedAt ?: JSONObject.NULL)
+    }
+
+    @Test
+    fun isDeletedRowIsTrueOnlyWhenDeletedAtIsAPresentNonBlankValue() {
+        assertTrue(isDeletedRow(remoteRow(deletedAt = "2026-08-28T17:57:54.571445+00:00")))
+        assertFalse(isDeletedRow(remoteRow(deletedAt = null)))
+        assertFalse(isDeletedRow(remoteRow(deletedAt = "")))
+    }
+
+    @Test
+    fun twoPassOrderingPutsEveryActiveRowBeforeEveryDeletedRowRegardlessOfInputOrder() {
+        // Mirrors the exact bug: a duplicate row (deleted) can have an OLDER
+        // updated_at than the still-active row for the same real product, so
+        // fetching with order=updated_at.asc alone puts the deleted row
+        // first -- see pullAll's own comment. This is the same expression
+        // pullAll uses, isolated so the ordering guarantee itself is
+        // regression-tested without needing Room or a network.
+        val rows = listOf(
+            remoteRow(deletedAt = "2026-08-28T17:01:09.935+00:00"), // the duplicate, deleted, but OLDER
+            remoteRow(deletedAt = null),                             // the real, active row -- fetched second
+            remoteRow(deletedAt = null)                              // another unrelated active row
+        )
+
+        val order = rows.indices.sortedBy { isDeletedRow(rows[it]) }
+
+        // Both active rows (indices 1 and 2) come before the deleted one
+        // (index 0), and their own relative order is preserved (stable sort).
+        assertEquals(listOf(1, 2, 0), order)
     }
 }
