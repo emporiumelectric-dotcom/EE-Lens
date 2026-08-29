@@ -1,5 +1,6 @@
 package com.fanlens.prototype.supabase
 
+import android.util.Log
 import androidx.room.withTransaction
 import com.fanlens.prototype.data.CatalogRepository
 import com.fanlens.prototype.data.PhotoStore
@@ -129,6 +130,17 @@ class CloudSyncManager(
                 processed++
             } catch (error: Throwable) {
                 failed++
+                // Previously silent: a per-row failure only ever showed up as
+                // "N of M failed" in cloudRefreshStatusMessage, with no way
+                // to tell what actually went wrong for which row -- this is
+                // exactly the gap that made the "Havells Stealth Air"
+                // follow-up impossible to diagnose from outside the device.
+                Log.e(
+                    TAG,
+                    "pullProduct failed for client_id=$clientId " +
+                        "(${row.optString("brand")} ${row.optString("name")} ${row.optString("model")})",
+                    error
+                )
             }
         }
         onProgress(total, total)
@@ -371,6 +383,8 @@ class CloudSyncManager(
     }
 
     companion object {
+        private const val TAG = "CloudSyncManager"
+
         private val UUID_REGEX = Regex(
             "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
         )
