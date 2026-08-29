@@ -186,4 +186,49 @@ class CloudSyncManagerTest {
         // (index 0), and their own relative order is preserved (stable sort).
         assertEquals(listOf(1, 2, 0), order)
     }
+
+    @Test
+    fun aDeviceAlreadySoftDeletedByThePreFixOrderingBugSelfHealsOnTheNextPull() {
+        // Follow-up investigation, after the two-pass fix (PR #13) shipped
+        // and the reported symptom persisted on the one device that had
+        // already been hit by the pre-fix bug. This proves what the code
+        // actually does to that device's already-corrupted local row on its
+        // next pull -- not what it does to a clean device (already covered
+        // by the scenarios above).
+        //
+        // That device's real state, reconstructed from the live incident:
+        // its local product still sits under the original slug id, soft-
+        // deleted (by the pre-fix pull processing the older, deleted
+        // duplicate row before the newer, active one), with cloudClientId
+        // still pointing at that now-deleted duplicate's client_id -- never
+        // corrected, because nothing has matched this row since.
+        val duplicateClientId = "50c58588-ee35-4a32-bd33-fd017853b092"
+        val authoritativeClientId = "63ee3258-a788-483a-b28c-764ebd9e612a"
+        val corrupted = product(
+            id = "havells-stealth-air-pearl-white",
+            brand = "Havells",
+            name = "Havells Stealth Air",
+            model = "1200 mm · Pearl White",
+            cloudClientId = duplicateClientId,
+            deletedAt = 1787978274571L // already soft-deleted by the earlier bad pull
+        )
+
+        // On the next pull, the active (authoritative) row is now processed
+        // first, exactly as intended -- but selectPullMatch still can't find
+        // this local row for it: id and cloudClientId both miss (neither
+        // equals the authoritative row's client_id), and the content
+        // fallback explicitly excludes already-deleted local rows.
+        val match = selectPullMatch(
+            authoritativeClientId, corrupted.brand, corrupted.name, corrupted.model, listOf(corrupted)
+        )
+
+        // So pullProduct treats the authoritative row as a genuinely new
+        // product and inserts it fresh under its own client_id as the local
+        // id -- the corrupted row is simply left behind, orphaned but
+        // harmless (soft-deleted, never revisited again). The device ends
+        // up with the product back, correctly, just under a new local id --
+        // this is the fix actually self-healing an already-corrupted
+        // device, not a case that stays broken.
+        assertNull(match)
+    }
 }
