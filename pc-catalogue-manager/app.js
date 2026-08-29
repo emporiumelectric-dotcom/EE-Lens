@@ -839,6 +839,13 @@ function refreshSpecSuggestion() {
 let candidate = null;   // the extracted, still-unapproved product
 let importQueue = [];   // every link pasted, in order
 let queueIndex = 0;
+let candidateImageObjectUrls = [];   // this queue item's thumbnail blob: URLs -- revoked before the next ones are made
+
+/** Frees the blob: URLs backing the current candidate's thumbnails, so switching queue items or closing the modal doesn't leak them. */
+function revokeCandidateThumbnails() {
+  for (const url of candidateImageObjectUrls) URL.revokeObjectURL(url);
+  candidateImageObjectUrls = [];
+}
 
 function openUrlImport() {
   candidate = null;
@@ -858,6 +865,7 @@ function openUrlImport() {
 function closeUrlImport() {
   $('url-modal').hidden = true;
   candidate = null;
+  revokeCandidateThumbnails();
 }
 
 function showUrlError(message) {
@@ -1030,25 +1038,45 @@ function renderCandidate() {
     specHost.append(row);
   });
 
-  // image candidates, previewed through the helper so nothing is downloaded twice
+  // Image candidates are loaded through fetchImageUrl() -- the same
+  // function that downloads them for real at approve time -- rather than a
+  // plain <img src> pointed at the proxy. A bare <img> tag never sends an
+  // Origin header, only a Referer, which under the browser's default
+  // strict-origin-when-cross-origin policy is origin-only (no path) for any
+  // cross-origin request; the Worker's own access check wants Origin or a
+  // path-qualified Referer, so every thumbnail 403'd on the hosted site --
+  // silently, since the only visible symptom is the tile hiding itself (see
+  // .cand.bad in styles.css) once its <img> fires 'error'. fetchImageUrl's
+  // real fetch() call sends Origin reliably, sidestepping that regardless of
+  // referrer-policy or privacy-extension referrer stripping, and as a bonus
+  // can carry the optional proxy-secret header a plain <img src> never could.
+  revokeCandidateThumbnails();
   const imageHost = $('u-images');
   imageHost.textContent = '';
-  c.images.forEach((src, index) => {
+  const loads = c.images.map((src, index) => {
     const tile = document.createElement('div');
     tile.className = 'tile cand';
     tile.dataset.src = src;
 
     const img = document.createElement('img');
-    // A plain <img src> can't carry the optional proxy-secret header
-    // fetchImageUrl sends, so this only loads without a hitch when no
-    // CLOUD_FETCH_PROXY_SECRET is set (the default). With one set, a
-    // candidate can show as unloadable here even though "Approve and save"
-    // -- which downloads through fetchImageUrl itself -- would still fetch
-    // it fine; see cloudflare/import-url-proxy/README.md.
-    img.src = fetchImageProxyEndpoint(src);
     img.alt = '';
-    img.loading = 'lazy';
-    // A link that will not load is not a candidate; drop it quietly.
+    // A link that will not load is not a candidate; drop it quietly -- but
+    // still report it below if that turns out to be every single one, so a
+    // total failure never just looks like an empty modal.
+    const attempt = fetchImageUrl(src)
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        candidateImageObjectUrls.push(objectUrl);
+        img.src = objectUrl;
+        return true;
+      })
+      .catch(() => {
+        tile.classList.add('bad');
+        updateCandidateSummary();
+        return false;
+      });
+    // A blob: URL should always decode, but guard anyway rather than leave
+    // a tile permanently blank if it somehow doesn't.
     img.addEventListener('error', () => { tile.classList.add('bad'); updateCandidateSummary(); });
 
     const bar = document.createElement('div');
@@ -1073,12 +1101,29 @@ function renderCandidate() {
     tile.classList.toggle('off', !keep.checked);
     tile.append(img, bar);
     imageHost.append(tile);
+    return attempt;
   });
 
   $('u-image-count').textContent = c.images.length ? `${c.images.length} found` : 'none found';
   $('url-preview').hidden = false;
   $('url-approve').disabled = false;
   updateCandidateSummary();
+
+  // Once every candidate has either loaded or failed, call out a *total*
+  // failure explicitly -- a few broken links among many good ones is normal
+  // and stays silent (per-tile, above), but every single one failing reads
+  // as a real problem, not a page with no photos. Guarded against a queue
+  // item switch in the meantime, so a stale result never overwrites the
+  // count for whichever candidate is showing by the time this settles.
+  if (loads.length > 0) {
+    Promise.all(loads).then((results) => {
+      if (candidate !== c) return;
+      if (results.every((ok) => !ok)) {
+        $('u-image-count').textContent =
+          `${c.images.length} found, but none could be downloaded — try again, or add photos by hand after saving.`;
+      }
+    });
+  }
 }
 
 /**
