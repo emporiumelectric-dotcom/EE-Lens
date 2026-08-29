@@ -107,10 +107,23 @@ class CloudSyncManager(
         var processed = 0
         var failed = 0
         val total = remoteProducts.length()
-        for (i in 0 until total) {
-            onProgress(i, total)
+        // Active rows are processed before deleted ones, regardless of the
+        // server's own updated_at order: a deleted row can carry an OLDER
+        // timestamp than an active row for the same underlying product --
+        // e.g. a duplicate marked deleted after a newer, still-active row
+        // already existed for the same real-world product. Processing the
+        // deleted row first can strong-match (by id or cloudClientId) and
+        // soft-delete a local product before the active row ever gets the
+        // chance to rebind that identity away from the deleted row, in this
+        // same pull -- exactly what happened to the "Havells Stealth Air"
+        // product on the device that had pushed the now-deleted duplicate.
+        // sortedBy is stable, so this only reorders deleted vs. not,
+        // preserving the ascending updated_at order within each group.
+        val order = (0 until total).sortedBy { isDeletedRow(remoteProducts.getJSONObject(it)) }
+        order.forEachIndexed { position, i ->
+            onProgress(position, total)
             val row = remoteProducts.getJSONObject(i)
-            val clientId = row.optString("client_id").takeIf { it.isNotBlank() } ?: continue
+            val clientId = row.optString("client_id").takeIf { it.isNotBlank() } ?: return@forEachIndexed
             try {
                 pullProduct(token, row, clientId, localsByCurrentId)
                 processed++
@@ -233,7 +246,7 @@ class CloudSyncManager(
         )
         val localId = local?.id ?: clientId
 
-        if (!row.isNull("deleted_at") && row.optString("deleted_at").isNotBlank()) {
+        if (isDeletedRow(row)) {
             // A content-only match (no id or cloudClientId match -- see
             // selectPullMatch) is too weak to trust with a delete: unlike
             // applying data, where a false positive just means an extra
@@ -399,6 +412,14 @@ internal fun pushWouldLoseToRemote(remoteUpdatedAt: Long?, localUpdatedAt: Long)
     if (remoteUpdatedAt == null) return false // never pushed before -- nothing to lose to
     return remoteUpdatedAt >= localUpdatedAt
 }
+
+/**
+ * Whether a remote products row has been (soft-)deleted. Pure and
+ * dependency-free so pullAll's two-pass ordering (see its own comment) is
+ * unit-testable on its own; see CloudSyncManagerTest.
+ */
+internal fun isDeletedRow(row: JSONObject): Boolean =
+    !row.isNull("deleted_at") && row.optString("deleted_at").isNotBlank()
 
 /**
  * What (if anything) to tell the Products screen's owner about a pull-to-

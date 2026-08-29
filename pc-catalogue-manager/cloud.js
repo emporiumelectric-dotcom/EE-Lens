@@ -392,6 +392,18 @@ async function cloudPullAll(onProgress) {
     headers,
     query: 'select=*&order=updated_at.asc'
   });
+  // Active rows are processed before deleted ones, regardless of the
+  // server's own updated_at order: a deleted row can carry an OLDER
+  // timestamp than an active row for the same underlying product -- e.g. a
+  // duplicate marked deleted after a newer, still-active row already
+  // existed for the same real-world product. Processing the deleted row
+  // first can strong-match (by id or cloudClientId) and remove a local
+  // product before the active row ever gets the chance to rebind that
+  // identity away from the deleted row, in this same pull. sort() is
+  // stable, so this only reorders deleted vs. not, preserving the ascending
+  // updated_at order within each group. Mirrors CloudSyncManager.kt's
+  // pullAll.
+  remoteProducts.sort((a, b) => Number(Boolean(a.deleted_at)) - Number(Boolean(b.deleted_at)));
   const localAll = await listProducts();
   const findLocalProduct = (rp) => selectPullMatch(rp.client_id, rp.brand, rp.name, rp.model, localAll);
 
