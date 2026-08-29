@@ -143,6 +143,46 @@ why the User-Agent itself was deliberately left as the honest,
 self-identifying string it already was rather than swapped for a fake
 browser UA to try to look less like a known tool.
 
+## Known limitation: even a Cloudflare-fronted site can start challenging this Worker temporarily
+
+Separate from the Flipkart finding above: `atomberg.com` -- itself hosted
+behind Cloudflare -- started returning its own "verify you are human"
+interstitial through this Worker after being fetched repeatedly during
+testing on the same day it had worked fine. `worker.js` now recognises that
+specific interstitial (a stable, well-known Cloudflare page -- its
+`/cdn-cgi/challenge-platform/` script path, "Just a moment..." title, and
+cookie-notice wording have been consistent across every redesign of it) and
+reports it plainly instead of handing the raw challenge page to the
+importer to be mis-parsed as a garbled, blank "product". That's detection,
+not evasion -- it does nothing to get past the challenge.
+
+**Read this as very likely temporary, not a new persistent block.** A few
+reasons, reasoned from how Cloudflare's own bot-management is documented to
+work, not verified live (this sandbox has no path to `atomberg.com`):
+
+- The same URL worked earlier the same day; a genuinely persistent block
+  wouldn't have. Cloudflare's per-visitor risk scoring is dynamic --
+  repeated requests to one zone in a short window from a shared,
+  cookie-less source (which is structurally what a Worker's `fetch()`
+  always is: no session, no `cf_clearance` cookie carried between calls)
+  raises that score, and it decays over time once the traffic stops.
+- This project tested this same URL and others on `atomberg.com`
+  repeatedly on the same day while investigating the MRP gap above --
+  itself the kind of burst pattern that trips exactly this.
+- Separately worth knowing, not fixed here: each import already fires a
+  concurrent `fetchImageUrl()` call per candidate image (up to 14) against
+  the same origin -- a real burst on every normal import of a
+  multi-photo product, not just during testing. Deliberately **not**
+  changed in response to this report: doing so specifically because of a
+  bot challenge would be exactly the kind of workaround this investigation
+  was told not to attempt. If it's ever worth doing as a matter of being a
+  considerate client generally, that's a separate, explicitly-scoped
+  decision, not a side effect of chasing this issue away.
+
+If imports from `atomberg.com` are still challenged after some time has
+passed, that would be worth a fresh look -- but the honest expectation
+going in is that this clears on its own.
+
 ## Known limitation, worth a real review before this is trusted further
 
 `worker.js`'s `refusalFor()` blocks obviously-private hostnames

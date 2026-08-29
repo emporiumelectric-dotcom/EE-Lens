@@ -149,6 +149,34 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
+/**
+ * Recognises Cloudflare's own "verify you are human" interstitial -- served
+ * as ordinary text/html with a 200-ish status, so nothing above would
+ * otherwise catch it, and it would silently pass through to the importer as
+ * if it were the real page. That produces a confusing, garbled "product"
+ * (whatever stray text the interstitial's own markup happens to contain)
+ * with no real data, rather than a clear explanation -- the exact raw-HTML-
+ * as-error problem this proxy was already built to avoid for a plain 404.
+ *
+ * This is detection, not evasion: it does nothing to get past the
+ * challenge, only recognises one and says so plainly instead of guessing at
+ * a garbled product. /cdn-cgi/challenge-platform/ is Cloudflare's own,
+ * stable path for this across every version of the challenge page's design;
+ * the title and cookie-notice text are the same well-known wording
+ * Cloudflare has used for years. A page that merely mentions Cloudflare in
+ * passing won't match this -- these are specific enough that only an actual
+ * challenge page should trigger it.
+ */
+const CLOUDFLARE_CHALLENGE_MARKERS = [
+  /cdn-cgi\/challenge-platform/i,
+  /<title>\s*just a moment/i,
+  /enable javascript and cookies to continue/i
+];
+
+function looksLikeCloudflareChallenge(html) {
+  return CLOUDFLARE_CHALLENGE_MARKERS.some((pattern) => pattern.test(html));
+}
+
 /** GET /?url=... -- the page-fetch job, returning {finalUrl, html}. */
 async function handlePage(target, allowedOrigin) {
   let upstream;
@@ -195,6 +223,15 @@ async function handlePage(target, allowedOrigin) {
     html = new TextDecoder(charset).decode(buffer);
   } catch {
     html = new TextDecoder('utf-8').decode(buffer); // an unrecognised charset name -- read as UTF-8 rather than fail outright
+  }
+
+  if (looksLikeCloudflareChallenge(html)) {
+    return textResponse(
+      503,
+      'That site is showing a "verify you are human" check right now instead of the real page. ' +
+        'This is usually temporary -- wait a few minutes and try again, or use the local helper.',
+      allowedOrigin
+    );
   }
 
   return jsonResponse({ finalUrl: upstream.url, html }, allowedOrigin);
