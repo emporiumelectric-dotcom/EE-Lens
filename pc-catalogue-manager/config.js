@@ -12,17 +12,13 @@
  * Kept in its own file so there is exactly one place to look when rotating
  * the key or pointing this tool at a different Supabase project.
  */
-
 const SUPABASE_URL = 'https://buzidwccluskdkccidev.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_Zm5PI1gxB8ZU6_m4Dydirw_THsgZR7x';
-
 // The schema these tables live in — every REST call must say so explicitly,
 // since PostgREST only serves the "public" schema by default.
 const SUPABASE_SCHEMA = 'ee_lens';
-
 // Private Storage bucket holding product photos synced to the cloud.
 const SUPABASE_PHOTOS_BUCKET = 'ee-lens-photos';
-
 /*
  * "Import from product URL" needs something to fetch an external page on
  * this tool's behalf -- the browser cannot do it directly for a site that
@@ -34,5 +30,5 @@ const SUPABASE_PHOTOS_BUCKET = 'ee-lens-photos';
  * of its own) the import goes to this Cloudflare Worker instead. See
  * cloudflare/import-url-proxy/README.md for what to deploy and paste here.
  */
-const CLOUD_FETCH_PROXY_URL = ''; // e.g. 'https://ee-lens-import-proxy.YOUR-SUBDOMAIN.workers.dev'
+const CLOUD_FETCH_PROXY_URL = 'https://ee-lens-fetch-proxy.emporiumelectric.workers.dev'; // e.g. 'https://ee-lens-import-proxy.YOUR-SUBDOMAIN.workers.dev'
 const CLOUD_FETCH_PROXY_SECRET = ''; // only needed if the Worker's PROXY_SHARED_SECRET is set
