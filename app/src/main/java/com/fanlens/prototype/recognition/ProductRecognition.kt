@@ -244,6 +244,14 @@ internal fun resolveMatch(
     }
 }
 
+/**
+ * Known gap, not yet closed here: two structurally-identical products that
+ * differ only in colour/finish (e.g. several Havells Enticer variants) can
+ * end up this close together purely because EmbeddingGenerator's model has
+ * little reliable colour signal of its own -- see ColorSignature.kt's doc
+ * comment for the full investigation and the (currently unwired) tie-break
+ * this is designed to slot into, right at MINIMUM_LEAD below.
+ */
 internal object MatchPolicy {
     /**
      * Shop photos against a real product on the shelf.
