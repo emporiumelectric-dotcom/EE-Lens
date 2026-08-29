@@ -413,7 +413,17 @@ function parseAtomberg(doc, payload, finalUrl) {
     colour: chosen?.colour || '',
     description: cleanDescription(firstString(ld?.description) || '', chosen?.name || firstString(ld?.name) || ''),
     priceMinor: chosen?.priceMinor ?? null,
-    mrpMinor: chosen?.mrpMinor ?? null,
+    // The payload's own price_range.minimum_price.regular_price is usually
+    // there, but not always -- sliceValue's "variants" match is the first
+    // one anywhere in this page's whole Next.js flight-data blob, which can
+    // easily belong to a different component than the product actually
+    // being viewed (see this adapter's own header comment: this payload is
+    // known to mix in unrelated data). When the payload doesn't give a
+    // usable MRP, fall back to the same page-text/strikethrough detection
+    // the generic parser uses below -- real Atomberg pages do visibly show
+    // "M.R.P ₹X" next to a struck-through price, so this is a real second
+    // chance at a real number, not a guess.
+    mrpMinor: chosen?.mrpMinor ?? mrpFromText(doc),
     sizeSweepMm: chosen?.sizeSweepMm ?? null,
     specs,
     images: chosen?.images?.length ? chosen.images : images,
