@@ -227,6 +227,10 @@ function pushWouldLoseToRemote(remoteUpdatedAtIso, localUpdatedAtMs) {
  */
 async function cloudPushProduct(product, headers) {
   const clientId = await resolveProductClientId(product);
+  console.debug(
+    `[CloudPushTrace] pushProduct start localId=${product.id} clientId=${clientId} ` +
+      `localUpdatedAt=${product.updatedAt}`
+  );
 
   // Checked before touching anything else: this push must never overwrite a
   // remote edit newer than the one it is carrying (see pushWouldLoseToRemote).
@@ -235,6 +239,10 @@ async function cloudPushProduct(product, headers) {
     query: `client_id=eq.${clientId}&select=updated_at`
   });
   if (existingRemote && pushWouldLoseToRemote(existingRemote.updated_at, product.updatedAt)) {
+    console.debug(
+      `[CloudPushTrace] pushProduct SKIPPED (last-write-wins) clientId=${clientId} ` +
+        `remoteUpdatedAt=${existingRemote.updated_at} localUpdatedAt=${product.updatedAt}`
+    );
     return;
   }
 
@@ -258,6 +266,7 @@ async function cloudPushProduct(product, headers) {
     query: 'on_conflict=client_id',
     prefer: 'resolution=merge-duplicates,return=representation'
   });
+  console.debug(`[CloudPushTrace] pushProduct upserted product row clientId=${clientId} remoteId=${savedProduct.id}`);
 
   const photos = await photosFor(product.id);
   const remotePhotoIdByLocalId = {};
@@ -266,35 +275,63 @@ async function cloudPushProduct(product, headers) {
   for (const photo of photos) {
     const photoClientId = await resolvePhotoClientId(photo);
     survivingClientIds.push(photoClientId);
+    // Keyed by clientId/photoClientId (the cloud identity), never
+    // product.id/photo.id (the local one) -- a legacy-id product's local id
+    // is a fixed slug like "havells-stealth-air-pearl-white", not something
+    // a pulling device can ever reconstruct on its own. It is a pure
+    // function of those two ids, so it is the exact same value on every
+    // push of this photo -- always included below, whether or not bytes
+    // are (re-)uploaded this time.
+    //
+    // It used to be left OUT of the upsert body whenever cloudPushedSha256
+    // already matched, on the theory that omitting a column on a repeat
+    // push meant "leave whatever is already there alone". That is not how
+    // PostgREST's resolution=merge-duplicates upsert behaves: an omitted
+    // key is not "don't touch this column" -- PostgREST still builds a full
+    // row for the ON CONFLICT DO UPDATE, and an omitted column with no
+    // default (storage_path has none) is written as NULL. storage_path is
+    // NOT NULL, so this 400'd on Postgres's own constraint -- silently,
+    // since cloudBackgroundPush only logs to the console and toasts, with
+    // nothing recording that "last pushed" never actually advanced. That
+    // broke every second-or-later push of any product with at least one
+    // already-pushed photo, not just a photo-removal edit. See
+    // CloudSyncManager.kt's pushProduct for the same fix on Android.
     const photoBody = {
       client_id: photoClientId,
       product_id: savedProduct.id,
       role: localRoleToCloud(photo.role),
       sort_order: photo.sortOrder,
-      checksum: photo.sha256
+      checksum: photo.sha256,
+      storage_path: cloudPhotoPath(clientId, photoClientId)
     };
     if (photo.cloudPushedSha256 !== photo.sha256) {
-      // Keyed by clientId/photoClientId (the cloud identity), never
-      // product.id/photo.id (the local one) -- a legacy-id product's local
-      // id is a fixed slug like "havells-stealth-air-pearl-white", not
-      // something a pulling device can ever reconstruct on its own.
-      // storage_path is only ever set here, the one place bytes actually
-      // land at that path; an already-pushed photo below leaves it out of
-      // the upsert entirely so a repeat push can never point the row at a
-      // path nothing was written to. See CloudSyncManager.kt's pushProduct
-      // for the same fix on Android.
+      console.debug(
+        `[CloudPushTrace] pushProduct uploading photo bytes clientId=${clientId} ` +
+          `photoClientId=${photoClientId} path=${photoBody.storage_path}`
+      );
       await cloudUploadPhoto(clientId, photoClientId, photo, headers);
       photo.cloudPushedSha256 = photo.sha256;
       touched = true;
-      photoBody.storage_path = cloudPhotoPath(clientId, photoClientId);
     }
-    const [savedPhoto] = await cloudRest('POST', 'product_photos', photoBody, {
-      headers,
-      query: 'on_conflict=client_id',
-      prefer: 'resolution=merge-duplicates,return=representation'
-    });
+    let savedPhoto;
+    try {
+      [savedPhoto] = await cloudRest('POST', 'product_photos', photoBody, {
+        headers,
+        query: 'on_conflict=client_id',
+        prefer: 'resolution=merge-duplicates,return=representation'
+      });
+    } catch (error) {
+      console.error(
+        `[CloudPushTrace] pushProduct photo upsert FAILED clientId=${clientId} ` +
+          `photoClientId=${photoClientId} cloudPushedSha256=${photo.cloudPushedSha256} body=`,
+        photoBody,
+        error
+      );
+      throw error;
+    }
     remotePhotoIdByLocalId[photo.id] = savedPhoto.id;
   }
+  console.debug(`[CloudPushTrace] pushProduct upserted ${photos.length} photo row(s) clientId=${clientId}`);
   if (touched) await putPhotos(photos);
 
   // A photo removed locally must stop existing in the cloud too -- see
@@ -308,7 +345,14 @@ async function cloudPushProduct(product, headers) {
   const remoteRowByClientId = new Map(
     remotePhotos.filter((r) => r.client_id).map((r) => [r.client_id, r])
   );
-  for (const staleClientId of remotePhotoClientIdsToDelete([...remoteRowByClientId.keys()], survivingClientIds)) {
+  const staleClientIds = remotePhotoClientIdsToDelete([...remoteRowByClientId.keys()], survivingClientIds);
+  if (staleClientIds.length > 0) {
+    console.debug(
+      `[CloudPushTrace] pushProduct deleting ${staleClientIds.length} stale remote photo(s) ` +
+        `clientId=${clientId} ids=${staleClientIds.join(',')}`
+    );
+  }
+  for (const staleClientId of staleClientIds) {
     const staleRow = remoteRowByClientId.get(staleClientId);
     if (staleRow.storage_path) await cloudDeletePhotoObject(staleRow.storage_path, headers);
     await cloudRest('DELETE', 'product_photos', undefined, { headers, query: `id=eq.${staleRow.id}` });
@@ -316,11 +360,16 @@ async function cloudPushProduct(product, headers) {
 
   const coverRemoteId = product.coverPhotoId ? (remotePhotoIdByLocalId[product.coverPhotoId] ?? null) : null;
   if (coverRemoteId !== savedProduct.cover_photo_id) {
+    console.debug(
+      `[CloudPushTrace] pushProduct updating cover_photo_id clientId=${clientId} ` +
+        `${savedProduct.cover_photo_id} -> ${coverRemoteId}`
+    );
     await cloudRest('PATCH', 'products', { cover_photo_id: coverRemoteId }, {
       headers,
       query: `id=eq.${savedProduct.id}`
     });
   }
+  console.debug(`[CloudPushTrace] pushProduct SUCCESS clientId=${clientId} remoteId=${savedProduct.id}`);
 }
 
 /**
@@ -329,13 +378,22 @@ async function cloudPushProduct(product, headers) {
  * the product is already safely saved on this PC either way.
  */
 function cloudBackgroundPush(product) {
-  if (!isSignedIn()) return;
+  if (!isSignedIn()) {
+    console.debug(`[CloudPushTrace] cloudBackgroundPush NO-OP for localId=${product.id}: not signed in`);
+    return;
+  }
+  console.debug(`[CloudPushTrace] cloudBackgroundPush queued for localId=${product.id}`);
   (async () => {
     try {
       const headers = await cloudAuthHeaders(true);
       await cloudPushProduct(product, headers);
       cloudSetLastSyncAt('push', Date.now());
+      console.debug(`[CloudPushTrace] cloudBackgroundPush SUCCESS for localId=${product.id}; last-pushed-at updated`);
     } catch (error) {
+      // The product is still safely saved here either way -- "last pushed"
+      // is deliberately not updated on this path. See the [CloudPushTrace]
+      // lines above this one for exactly where it failed, not just this
+      // one summary line.
       console.error('Cloud push failed', error);
       toast(`Saved here, but the cloud copy could not be updated: ${error.message}`, true);
     }

@@ -525,12 +525,22 @@ class CatalogRepository(
      */
     @OptIn(DelicateCoroutinesApi::class)
     private fun cloudBackgroundPush(product: ProductEntity) {
+        Log.d(CloudSyncManager.PUSH_TAG, "cloudBackgroundPush queued for localId=${product.id}")
         GlobalScope.launch(Dispatchers.IO) {
             try {
                 if (cloudSync.pushOne(product)) {
                     database.metaDao().put(EeDatabase.KEY_CLOUD_LAST_PUSH_AT, System.currentTimeMillis().toString())
+                    Log.d(CloudSyncManager.PUSH_TAG, "cloudBackgroundPush SUCCESS for localId=${product.id}; last-pushed-at updated")
+                } else {
+                    Log.d(CloudSyncManager.PUSH_TAG, "cloudBackgroundPush NO-OP for localId=${product.id}: not signed in")
                 }
             } catch (error: Throwable) {
+                // pushOne threw somewhere inside pushProduct -- the product
+                // is still safely saved locally, but "last pushed" is
+                // deliberately NOT updated here: see PUSH_TAG's own log
+                // lines above this one (uploading/upserting/deleting a
+                // specific photo, or the product row itself) for exactly
+                // where it failed, instead of just this one summary line.
                 Log.e(TAG, "Cloud push failed for ${product.id}", error)
             }
         }

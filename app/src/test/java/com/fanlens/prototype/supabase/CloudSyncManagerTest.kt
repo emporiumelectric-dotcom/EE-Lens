@@ -153,6 +153,50 @@ class CloudSyncManagerTest {
         assertNull(selectPullMatch(remoteUuid, "", "", "", listOf(local)))
     }
 
+    // ---------------- photoUpsertBody ----------------
+
+    @Test
+    fun photoUpsertBodyAlwaysIncludesStoragePathEvenForAnAlreadySyncedPhoto() {
+        // The real bug this guards against: storage_path used to be left
+        // OUT of this body entirely whenever the photo was already synced
+        // (syncedAt != null), on the theory that omitting a JSON key on a
+        // repeat push meant "leave whatever the column already holds
+        // alone". PostgREST's resolution=merge-duplicates upsert does not
+        // honour that: it still builds a full row for its ON CONFLICT DO
+        // UPDATE, and an omitted column with no default -- storage_path has
+        // none -- is written as NULL. storage_path is NOT NULL, so every
+        // second-or-later push of any product with at least one already-
+        // synced photo 400'd on that constraint, silently: the exception
+        // propagated out of pushProduct, was swallowed by
+        // cloudBackgroundPush's catch block, and "last pushed" simply never
+        // advanced -- exactly the field symptom this test exists to catch
+        // (a stale "Last pushed" timestamp on a plain repeat push, not just
+        // a photo-removal edit). storagePath is a pure function of
+        // clientId/photoClientId (see SupabaseSyncClient.photoStoragePath),
+        // so there is no reason it should ever depend on whether this is
+        // the photo's first push or its fifth.
+        val body = photoUpsertBody(
+            photoClientId = "8f14e45f-ceea-467e-9e0f-936c5e6b4e5c",
+            remoteProductId = 42L,
+            cloudRole = "catalogue",
+            sortOrder = 0,
+            checksum = "deadbeef",
+            storagePath = "11111111-1111-1111-1111-111111111111/8f14e45f-ceea-467e-9e0f-936c5e6b4e5c.jpg"
+        )
+
+        assertTrue("storage_path must always be present, never omitted", body.has("storage_path"))
+        assertEquals(
+            "11111111-1111-1111-1111-111111111111/8f14e45f-ceea-467e-9e0f-936c5e6b4e5c.jpg",
+            body.getString("storage_path")
+        )
+        // Every other field this body carries, unaffected by this fix.
+        assertEquals("8f14e45f-ceea-467e-9e0f-936c5e6b4e5c", body.getString("client_id"))
+        assertEquals(42L, body.getLong("product_id"))
+        assertEquals("catalogue", body.getString("role"))
+        assertEquals(0, body.getInt("sort_order"))
+        assertEquals("deadbeef", body.getString("checksum"))
+    }
+
     // ---------------- isDeletedRow / pullAll's two-pass ordering ----------------
 
     private fun remoteRow(deletedAt: String? = null) = JSONObject().apply {
