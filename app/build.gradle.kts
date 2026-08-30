@@ -128,6 +128,10 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // The real org.json, so .eelens parsing is tested rather than stubbed out.
     testImplementation("org.json:json:20240303")
+    // The real SQLite engine Room compiles PhotoEntity's schema to on-device
+    // (constraints included), so PhotoPullOrderingTest exercises the actual
+    // unique-index enforcement pullProduct hits, not an assumption about it.
+    testImplementation("org.xerial:sqlite-jdbc:3.46.1.3")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

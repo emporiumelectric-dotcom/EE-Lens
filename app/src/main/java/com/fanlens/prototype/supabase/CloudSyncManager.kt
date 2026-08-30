@@ -461,8 +461,33 @@ class CloudSyncManager(
 
             database.withTransaction {
                 if (local != null) database.productDao().update(entity) else database.productDao().insert(entity)
-                newPhotos.forEach { database.photoDao().insert(it) }
+                // Stale photos MUST be deleted before the new ones are
+                // inserted, not after -- PhotoEntity's own
+                // Index(["product_id", "sha256"], unique = true) is checked
+                // immediately per statement, not deferred to commit. Two
+                // different remote products that happen to share
+                // brand/name/model (e.g. the same test product pushed twice
+                // from the PC under different client_ids -- see
+                // selectPullMatch's content fallback) can land on the same
+                // local row here; if the newer push also reused one of the
+                // exact same image files, its photo carries the exact same
+                // sha256 as a stale local photo about to be replaced.
+                // Inserting first hit that unique index before the
+                // colliding stale row was ever removed -- a genuine,
+                // deterministic constraint violation, not a network flake:
+                // confirmed live on "Havells Cera Underlight BLDC Ceiling
+                // Fan" (remote ids 98 and 101, sharing photo checksum
+                // 02d23cd3...), which is exactly what
+                // cloudRefreshStatusMessage's "Cloud pull failed for 1 of
+                // 19 products" was reporting. Because the whole transaction
+                // rolled back every time, this local row's updatedAt never
+                // advanced, so every retry re-downloaded all 9 photos over
+                // the network and hit the exact same violation again --
+                // forever, not just once. See PhotoPullOrderingTest for a
+                // reproduction against the real schema and the real
+                // colliding checksums.
                 staleLocalPhotoIds.forEach { database.photoDao().delete(it) }
+                newPhotos.forEach { database.photoDao().insert(it) }
             }
             // Same reasoning as saveProduct's own removedPhotoIds handling:
             // files for rows deleted above are only removed once the
