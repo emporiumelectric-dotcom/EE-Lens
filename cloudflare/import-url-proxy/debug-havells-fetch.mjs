@@ -84,8 +84,28 @@ function collectCandidateImages(html, baseUrl) {
   return { images, imgTagCount: imgTags.length, rawCount: raw.length };
 }
 
-async function main() {
-  console.log(`Fetching page: ${PAGE_URL}`);
+// Close re-implementation of import-url.js's extractSpecs -- <tr>-with-2-
+// cells and <dl> reading via regex (no DOMParser in plain Node).
+function collectSpecs(html) {
+  const specs = {};
+  const add = (k, v) => {
+    const key = k.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().replace(/[:•]+$/, '');
+    const value = v.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    if (!key || !value) return;
+    if (key.length > 40 || value.length > 120) return;
+    if (Object.keys(specs).length >= 25) return;
+    if (!(key in specs)) specs[key] = value;
+  };
+  const trBlocks = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
+  for (const tr of trBlocks) {
+    const cells = [...tr[1].matchAll(/<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]>/gi)];
+    if (cells.length === 2) add(cells[0][1], cells[1][1]);
+  }
+  return { specs, trTagCount: trBlocks.length };
+}
+
+async function fetchPage(label) {
+  console.log(`\nFetching page (${label}): ${PAGE_URL}`);
   const pageResp = await fetch(PAGE_URL, {
     headers: {
       'User-Agent': USER_AGENT,
@@ -93,10 +113,34 @@ async function main() {
       'Accept-Language': 'en-IN,en;q=0.9'
     }
   });
-  log('Page fetch status', `${pageResp.status} ${pageResp.statusText}`);
-  log('Page final URL', pageResp.url);
-  log('Page content-type', pageResp.headers.get('content-type'));
   const html = await pageResp.text();
+  log(`[${label}] status`, `${pageResp.status} ${pageResp.statusText}`);
+  log(`[${label}] HTML length (bytes)`, html.length);
+  const { specs, trTagCount } = collectSpecs(html);
+  log(`[${label}] <tr> tag count`, trTagCount);
+  log(`[${label}] Specs found (Sweep/Power/Speed/Air delivery/Motor/Star rating/Warranty)`, {
+    Sweep: specs.Sweep, Power: specs.Power, Speed: specs.Speed,
+    'Air delivery': specs['Air delivery'], Motor: specs.Motor,
+    'Star rating': specs['Star rating'], Warranty: specs.Warranty
+  });
+  log(`[${label}] ALL specs found`, specs);
+  // Raw snippet around any "additional-attributes"/"specification" markup, to
+  // see by eye whether the spec table exists in this exact HTML at all.
+  const specSectionMatch = html.match(/additional-attributes[\s\S]{0,600}/i) || html.match(/product\.info\.additional[\s\S]{0,600}/i);
+  log(`[${label}] raw snippet near spec table marker`, specSectionMatch ? specSectionMatch[0] : '(no "additional-attributes" or "product.info.additional" marker found in this HTML)');
+  return { html, pageResp };
+}
+
+async function main() {
+  // Fetch twice, back-to-back, to check whether the page's own content is
+  // stable across requests (a real, plausible explanation on its own for
+  // "worked earlier today, doesn't now" that has nothing to do with this
+  // repo's code) before trusting a single sample either way.
+  const first = await fetchPage('fetch 1');
+  const second = await fetchPage('fetch 2');
+  log('Both fetches returned byte-identical HTML?', first.html === second.html);
+
+  const { html, pageResp } = first;
   log('Page HTML length (bytes)', html.length);
 
   const challengeMarkers = [/cdn-cgi\/challenge-platform/i, /<title>\s*just a moment/i, /enable javascript and cookies to continue/i];
