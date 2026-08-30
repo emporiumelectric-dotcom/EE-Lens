@@ -1,0 +1,23 @@
+name: Debug Havells Florette gallery regression (temporary)
+
+# Throwaway diagnostic for the "PR #26 fetched a completely different fan
+# model" report -- runs the sandbox-unreachable fetch on GitHub's own
+# runners instead (same reason android-build.yml exists). Deleted once the
+# investigation concludes; see cloudflare/import-url-proxy/debug-florette-gallery.mjs.
+
+on:
+  push:
+    branches: ["claude/havells-florette-gallery-regression"]
+  workflow_dispatch:
+
+jobs:
+  debug-fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Fetch the reported Florette product page and inspect its gallery JSON
+        run: node cloudflare/import-url-proxy/debug-florette-gallery.mjs "https://havells.com/fans/ceiling-fans/florette-ul-bldc-smartsense-ceiling-fan-fhclae4sbw52.html"
