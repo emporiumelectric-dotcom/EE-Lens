@@ -198,6 +198,31 @@ async function main() {
   }
   log(`Gallery-scoped <img> tags found (${galleryScoped.length})`, galleryScoped);
 
+  // Narrower signal: literally "gallery-placeholder", the exact class seen
+  // on the one hero photo tag in the sample above -- versus the broader
+  // "gallery|product-image" match, which turned out to sweep in a LOT of
+  // clearly-unrelated SKUs (a related-products carousel almost certainly
+  // also styled with a class matching that broad pattern somewhere nearby).
+  const NARROW_MARK = /gallery-placeholder/i;
+  const narrowScoped = [];
+  for (const tagMatch of html.matchAll(/<img\b[^>]*>/gi)) {
+    const tag = tagMatch[0];
+    const idx = tagMatch.index;
+    const windowBefore = html.slice(Math.max(0, idx - 800), idx);
+    if (NARROW_MARK.test(tag) || NARROW_MARK.test(windowBefore)) {
+      const srcMatch = tag.match(/\bsrc=["']([^"']*)["']/i) || tag.match(/\bdata-src=["']([^"']*)["']/i);
+      narrowScoped.push(srcMatch ? srcMatch[1] : null);
+    }
+  }
+  log(`"gallery-placeholder"-scoped <img> tags found (${narrowScoped.length})`, narrowScoped);
+
+  // How many img tags anywhere on the page reference this exact product's
+  // own SKU family (fhcil5s, from the URL's own product code) -- the true
+  // count of "real product photos" on this page, independent of any
+  // selection heuristic, to check against the reported "9 real images".
+  const skuMatches = [...new Set([...html.matchAll(/\/([a-z0-9_]*fhcil5s[a-z0-9_]*\.(?:jpg|png|webp))/gi)].map((m) => m[1]))];
+  log(`Distinct filenames anywhere in the HTML matching this product's own SKU family (fhcil5s) (${skuMatches.length})`, skuMatches);
+
   const noscriptBlocks = [...html.matchAll(/<noscript>([\s\S]*?)<\/noscript>/gi)].slice(0, 5).map((m) => m[1].slice(0, 300));
   log('First 5 <noscript> blocks (truncated 300 chars)', noscriptBlocks);
 
