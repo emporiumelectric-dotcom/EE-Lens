@@ -113,6 +113,59 @@ function cloudSetLastSyncAt(direction, whenMs) {
   }
 }
 
+/*
+ * "Pending push" bookkeeping: which local product ids have a push queued
+ * that has not yet been CONFIRMED to finish -- written synchronously, before
+ * any network call starts, and cleared only once cloudPushProduct genuinely
+ * returns. This is what lets a first push survive being cut off partway.
+ *
+ * A brand-new product's first push is the slow case: every one of its
+ * photos is new, so cloudPushProduct's for-await loop actually uploads
+ * every photo's bytes (cloudUploadPhoto), one at a time -- real network
+ * round-trips, not skipped the way an existing product's unchanged photos
+ * are (see cloudPushProduct's cloudPushedSha256 check). An edit to an
+ * existing product with no new photos finishes almost immediately, so it
+ * was never seen to have this problem. A page refresh -- someone checking
+ * "Last pushed" right after saving, exactly the reported habit -- tears
+ * down every in-flight request, including this one, before it can reach
+ * cloudSetLastSyncAt. Until now nothing noticed: cloudAutoPull runs
+ * automatically on every load, but nothing on the push side ever retried,
+ * so "Last pushed" stayed stale no matter how many times the page was
+ * reloaded. cloudCatchUpPush (below), run alongside cloudAutoPull on every
+ * load, is what gives an interrupted push another chance.
+ */
+function cloudPendingPushIds() {
+  try {
+    const raw = localStorage.getItem('ee-lens-cloud-push-pending');
+    const ids = raw ? JSON.parse(raw) : [];
+    return Array.isArray(ids) ? ids : [];
+  } catch {
+    return [];
+  }
+}
+
+function cloudMarkPushPending(productId) {
+  try {
+    const ids = cloudPendingPushIds();
+    if (!ids.includes(productId)) {
+      ids.push(productId);
+      localStorage.setItem('ee-lens-cloud-push-pending', JSON.stringify(ids));
+    }
+  } catch {
+    // Worst case a stale product is retried once more than necessary on the
+    // next load -- cloudPushProduct is safe to repeat.
+  }
+}
+
+function cloudClearPushPending(productId) {
+  try {
+    const ids = cloudPendingPushIds().filter((id) => id !== productId);
+    localStorage.setItem('ee-lens-cloud-push-pending', JSON.stringify(ids));
+  } catch {
+    // Not essential -- see cloudSetLastSyncAt.
+  }
+}
+
 /** Headers for a REST call. Write requests require a signed-in session. */
 async function cloudAuthHeaders(write) {
   const headers = {
@@ -383,21 +436,53 @@ function cloudBackgroundPush(product) {
     return;
   }
   console.debug(`[CloudPushTrace] cloudBackgroundPush queued for localId=${product.id}`);
+  // Recorded synchronously, before the first await below -- if the page is
+  // torn down (a refresh, most likely) before this push finishes, this mark
+  // survives in localStorage and cloudCatchUpPush retries it on next load.
+  cloudMarkPushPending(product.id);
   (async () => {
     try {
       const headers = await cloudAuthHeaders(true);
       await cloudPushProduct(product, headers);
       cloudSetLastSyncAt('push', Date.now());
+      cloudClearPushPending(product.id);
       console.debug(`[CloudPushTrace] cloudBackgroundPush SUCCESS for localId=${product.id}; last-pushed-at updated`);
     } catch (error) {
       // The product is still safely saved here either way -- "last pushed"
-      // is deliberately not updated on this path. See the [CloudPushTrace]
-      // lines above this one for exactly where it failed, not just this
-      // one summary line.
+      // is deliberately not updated on this path, and the pending mark is
+      // deliberately left in place so the next page load retries this push
+      // via cloudCatchUpPush instead of losing it silently.
       console.error('Cloud push failed', error);
       toast(`Saved here, but the cloud copy could not be updated: ${error.message}`, true);
     }
   })();
+}
+
+/**
+ * Retries any push left pending by a previous page's cloudBackgroundPush
+ * that never got to confirm success -- the fix for "saved a brand-new
+ * product, but Last pushed never updates, even after refreshing": every
+ * refresh used to just abandon the interrupted push and start fresh with
+ * nothing to retry it. Run alongside cloudAutoPull on every load; a no-op,
+ * cheap localStorage read when nothing is pending. Never blocks startup and
+ * never throws -- same contract as cloudBackgroundPush itself.
+ */
+async function cloudCatchUpPush() {
+  const pendingIds = cloudPendingPushIds();
+  if (!pendingIds.length || !isSignedIn()) return;
+  console.debug(`[CloudPushTrace] cloudCatchUpPush retrying ${pendingIds.length} pending push(es): ${pendingIds.join(',')}`);
+  const locals = await listProducts();
+  const byId = new Map(locals.map((p) => [p.id, p]));
+  for (const id of pendingIds) {
+    const product = byId.get(id);
+    if (!product) {
+      // Deleted (or never actually saved) since the mark was made -- nothing
+      // left to push; cloudDeleteProduct already handles telling the cloud.
+      cloudClearPushPending(id);
+      continue;
+    }
+    cloudBackgroundPush(product);
+  }
 }
 
 /**
