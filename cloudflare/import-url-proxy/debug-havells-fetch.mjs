@@ -29,6 +29,21 @@ function absolute(href, base) {
   try { return new URL(href, base).href; } catch { return null; }
 }
 
+// Every fetch below is timeout-guarded -- the real Worker's own
+// fetchWithTimeout does this too (FETCH_TIMEOUT_MS); plain fetch() has no
+// default timeout at all, so a single hung request (this run's first
+// attempt hit exactly that -- cancelled after several minutes stuck on one
+// fetch with no way to tell which) would otherwise stall the whole job.
+async function fetchWithTimeout(url, options, timeoutMs = 20_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Close re-implementation of import-url.js's extractProduct image-collecting
 // logic against raw HTML via regex (no DOMParser available in plain Node) --
 // same attribute priority (src, then data-src, then data-lazy-src), same
@@ -106,7 +121,7 @@ function collectSpecs(html) {
 
 async function fetchPage(label) {
   console.log(`\nFetching page (${label}): ${PAGE_URL}`);
-  const pageResp = await fetch(PAGE_URL, {
+  const pageResp = await fetchWithTimeout(PAGE_URL, {
     headers: {
       'User-Agent': USER_AGENT,
       Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
@@ -159,13 +174,13 @@ async function main() {
 
   for (const url of images) {
     try {
-      const resp = await fetch(url, {
+      const resp = await fetchWithTimeout(url, {
         headers: { 'User-Agent': USER_AGENT, Accept: 'image/*,*/*;q=0.8' },
         redirect: 'follow'
       });
       console.log(`\nIMAGE ${url}\n  -> status=${resp.status} content-type=${resp.headers.get('content-type')} finalUrl=${resp.url}`);
     } catch (err) {
-      console.log(`\nIMAGE ${url}\n  -> FETCH ERROR: ${err.message}`);
+      console.log(`\nIMAGE ${url}\n  -> FETCH ERROR: ${err.name === 'AbortError' ? 'timed out' : err.message}`);
     }
   }
 }
