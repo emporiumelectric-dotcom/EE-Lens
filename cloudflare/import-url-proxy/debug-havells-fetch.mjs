@@ -241,6 +241,12 @@ async function main() {
   const tabsMatch = html.match(/additional[\s\S]{0,10}information[\s\S]{0,800}/i) || html.match(/data-role=["']content["'][\s\S]{0,800}/i);
   log('Raw snippet near "additional information" / tab content marker', tabsMatch ? tabsMatch[0] : '(not found)');
 
+  // Where do the real spec VALUES ("Air delivery", "BLDC", "230 m") actually
+  // live in the markup, if not a <tr>/<dl> extractSpecs already reads?
+  const airDeliveryIdx = html.search(/Air\s*delivery/i);
+  log('600 chars of raw HTML BEFORE the first "Air delivery" mention', airDeliveryIdx >= 0 ? html.slice(Math.max(0, airDeliveryIdx - 600), airDeliveryIdx) : '(not found)');
+  log('600 chars of raw HTML AFTER the first "Air delivery" mention', airDeliveryIdx >= 0 ? html.slice(airDeliveryIdx, airDeliveryIdx + 600) : '(not found)');
+
   const noscriptBlocks = [...html.matchAll(/<noscript>([\s\S]*?)<\/noscript>/gi)].slice(0, 5).map((m) => m[1].slice(0, 300));
   log('First 5 <noscript> blocks (truncated 300 chars)', noscriptBlocks);
 
