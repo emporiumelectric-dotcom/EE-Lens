@@ -168,8 +168,10 @@ class CloudSyncManager(
         val remoteId = saved.getLong("id")
         val photos = database.photoDao().forProduct(product.id)
         val remotePhotoIdByLocalId = mutableMapOf<String, Long>()
+        val survivingClientIds = mutableSetOf<String>()
         for (photo in photos) {
             val photoClientId = resolvePhotoClientId(photo)
+            survivingClientIds += photoClientId
             val photoBody = JSONObject()
                 .put("client_id", photoClientId)
                 .put("product_id", remoteId)
@@ -193,6 +195,23 @@ class CloudSyncManager(
             val savedPhoto = sync.upsertPhoto(accessToken, photoBody)
             remotePhotoIdByLocalId[photo.id] = savedPhoto.getLong("id")
             if (photo.syncedAt == null) database.photoDao().setSyncedAt(photo.id, System.currentTimeMillis())
+        }
+
+        // A photo removed locally must stop existing in the cloud too --
+        // see remotePhotoClientIdsToDelete's doc comment for why this is
+        // safe to run unconditionally here (the last-write-wins gate at the
+        // top of this function has already passed for the product as a
+        // whole).
+        val remotePhotos = sync.fetchPhotosForProduct(accessToken, remoteId)
+        val remoteRowByClientId = (0 until remotePhotos.length())
+            .map { remotePhotos.getJSONObject(it) }
+            .filter { it.optString("client_id").isNotBlank() }
+            .associateBy { it.getString("client_id") }
+        for (staleClientId in remotePhotoClientIdsToDelete(remoteRowByClientId.keys, survivingClientIds)) {
+            val staleRow = remoteRowByClientId.getValue(staleClientId)
+            staleRow.optString("storage_path").takeIf { it.isNotBlank() }
+                ?.let { sync.deletePhotoObject(accessToken, it) }
+            sync.deletePhotoRow(accessToken, staleRow.getLong("id"))
         }
 
         val coverRemoteId = product.coverPhotoId?.let { remotePhotoIdByLocalId[it] }
@@ -294,16 +313,25 @@ class CloudSyncManager(
 
         val remoteId = row.getLong("id")
         val remotePhotos = sync.fetchPhotosForProduct(token, remoteId)
+        val remoteClientIds = (0 until remotePhotos.length())
+            .mapNotNullTo(mutableSetOf()) { remotePhotos.getJSONObject(it).optString("client_id").takeIf(String::isNotBlank) }
+
         // Same idea for photos: a legacy-id photo's client_id (its
         // cloudClientId) does not equal its local id, so map through both to
         // find what is already here -- and to resolve the cover photo below.
+        val existingLocalPhotos = database.photoDao().forProduct(localId)
         val localPhotoIdByCloudId = mutableMapOf<String, String>()
-        database.photoDao().forProduct(localId).forEach { p ->
+        existingLocalPhotos.forEach { p ->
             localPhotoIdByCloudId[p.id] = p.id
             p.cloudClientId?.let { localPhotoIdByCloudId[it] = p.id }
         }
+        // A photo removed on whichever device pushed this (newer) row must
+        // stop existing here too -- see photosToRemoveLocally's doc comment
+        // for the syncedAt guard that keeps this from ever touching a photo
+        // just added on this device that hasn't had a chance to push yet.
+        val staleLocalPhotoIds = photosToRemoveLocally(existingLocalPhotos, remoteClientIds)
 
-        var coverPhotoId = local?.coverPhotoId
+        var coverPhotoId = local?.coverPhotoId?.takeUnless { it in staleLocalPhotoIds }
         val now = System.currentTimeMillis()
         val newPhotos = mutableListOf<PhotoEntity>()
         val writtenFiles = mutableListOf<String>()
@@ -374,7 +402,13 @@ class CloudSyncManager(
             database.withTransaction {
                 if (local != null) database.productDao().update(entity) else database.productDao().insert(entity)
                 newPhotos.forEach { database.photoDao().insert(it) }
+                staleLocalPhotoIds.forEach { database.photoDao().delete(it) }
             }
+            // Same reasoning as saveProduct's own removedPhotoIds handling:
+            // files for rows deleted above are only removed once the
+            // transaction has committed, so a rollback cannot leave a row
+            // pointing at a missing file.
+            staleLocalPhotoIds.forEach { photoStore.delete(localId, it) }
             localsByCurrentId[localId] = entity
         } catch (error: Throwable) {
             writtenFiles.forEach { photoStore.delete(localId, it) }
@@ -493,3 +527,60 @@ internal fun selectPullMatch(
             it.model.equals(model, ignoreCase = true)
     }
 }
+
+/**
+ * Remote photo client_ids (out of [remoteClientIds], everything currently in
+ * the cloud for this product) that no longer match any surviving local
+ * photo -- a removed photo pushing its removal, the gap that let a photo
+ * deleted on the phone linger on the web tool forever (nothing ever told
+ * Supabase to delete it; see CatalogRepository.saveProduct's own delete,
+ * which only ever touched the *local* row).
+ *
+ * [survivingClientIds] must be each surviving local photo's already-resolved
+ * cloud identity (pushProduct's own resolvePhotoClientId return value for
+ * every photo it just upserted, not a raw PhotoEntity.cloudClientId read
+ * beforehand) -- a photo pushed for the first time in *this* push has that
+ * identity only in the resolved value, since resolvePhotoClientId's write
+ * lands in the database, not back onto the entity handed to it.
+ *
+ * Runs only after pushProduct's own pushWouldLoseToRemote gate has already
+ * passed for the product as a whole, which is what makes this safe: that
+ * gate having passed means this device's current photo set is the one that
+ * wins, so anything the cloud still has outside it belongs to a photo this
+ * device removed. Pure and dependency-free; see CloudSyncManagerTest.
+ */
+internal fun remotePhotoClientIdsToDelete(
+    remoteClientIds: Collection<String>,
+    survivingClientIds: Set<String>
+): Set<String> = remoteClientIds.filterNot { it in survivingClientIds }.toSet()
+
+/**
+ * Local photo ids (out of [localPhotos]) that no longer match anything in
+ * [remoteClientIds] -- the pull side of the same rule above, so a photo
+ * removed on one device eventually disappears on every other device too,
+ * not just the one that removed it.
+ *
+ * The id resolution -- a legacy-id photo's own local id doubling as its
+ * cloud identity until a push assigns it a real cloudClientId -- mirrors
+ * localPhotoIdByCloudId in pullProduct exactly; getting this key wrong here
+ * is the same class of mistake selectPullMatch exists to catch for whole
+ * products, just for a photo instead.
+ *
+ * Only ever considers a photo whose syncedAt is set (confirmed pushed to
+ * the cloud at least once): a photo just added locally and not yet pushed
+ * has no way to appear in [remoteClientIds] yet either, and this must never
+ * read that as "removed elsewhere" and delete a photo the owner only just
+ * added, before its own push has had a chance to run. Only runs, in
+ * pullProduct, once the remote row has already been established as newer
+ * than the local one -- see CloudSyncManagerTest for why that alone is not
+ * enough on its own without this guard too.
+ */
+internal fun photosToRemoveLocally(
+    localPhotos: Collection<PhotoEntity>,
+    remoteClientIds: Set<String>
+): Set<String> =
+    localPhotos
+        .filter { it.syncedAt != null }
+        .filterNot { (it.cloudClientId ?: it.id) in remoteClientIds }
+        .map { it.id }
+        .toSet()

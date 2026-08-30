@@ -190,6 +190,24 @@ async function cloudDownloadPhoto(storagePath, headers) {
 }
 
 /**
+ * Removes one photo's bytes from Storage. A 404 is treated as success --
+ * the goal ("this object should not exist") is already true, and this runs
+ * after a partial-failure retry as easily as a fresh delete.
+ */
+async function cloudDeletePhotoObject(storagePath, headers) {
+  const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_PHOTOS_BUCKET}/${storagePath}`;
+  const response = await fetchWithTimeout(
+    url,
+    { method: 'DELETE', headers: { apikey: headers.apikey, Authorization: headers.Authorization } },
+    CLOUD_PHOTO_TIMEOUT_MS
+  );
+  if (!response.ok && response.status !== 404) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Photo delete failed (${response.status}): ${text || response.statusText}`);
+  }
+}
+
+/**
  * Last-write-wins, made explicit: true when a remote row already carries an
  * updated_at at or after this device's local one, meaning a push would
  * clobber a newer edit made elsewhere with a stale one from here. No merge,
@@ -243,9 +261,11 @@ async function cloudPushProduct(product, headers) {
 
   const photos = await photosFor(product.id);
   const remotePhotoIdByLocalId = {};
+  const survivingClientIds = [];
   let touched = false;
   for (const photo of photos) {
     const photoClientId = await resolvePhotoClientId(photo);
+    survivingClientIds.push(photoClientId);
     const photoBody = {
       client_id: photoClientId,
       product_id: savedProduct.id,
@@ -276,6 +296,23 @@ async function cloudPushProduct(product, headers) {
     remotePhotoIdByLocalId[photo.id] = savedPhoto.id;
   }
   if (touched) await putPhotos(photos);
+
+  // A photo removed locally must stop existing in the cloud too -- see
+  // remotePhotoClientIdsToDelete's own comment for why this is safe to run
+  // unconditionally here (pushWouldLoseToRemote has already passed for the
+  // product as a whole, above).
+  const remotePhotos = await cloudRest('GET', 'product_photos', undefined, {
+    headers,
+    query: `product_id=eq.${savedProduct.id}&select=*`
+  });
+  const remoteRowByClientId = new Map(
+    remotePhotos.filter((r) => r.client_id).map((r) => [r.client_id, r])
+  );
+  for (const staleClientId of remotePhotoClientIdsToDelete([...remoteRowByClientId.keys()], survivingClientIds)) {
+    const staleRow = remoteRowByClientId.get(staleClientId);
+    if (staleRow.storage_path) await cloudDeletePhotoObject(staleRow.storage_path, headers);
+    await cloudRest('DELETE', 'product_photos', undefined, { headers, query: `id=eq.${staleRow.id}` });
+  }
 
   const coverRemoteId = product.coverPhotoId ? (remotePhotoIdByLocalId[product.coverPhotoId] ?? null) : null;
   if (coverRemoteId !== savedProduct.cover_photo_id) {
@@ -381,6 +418,49 @@ function selectPullMatch(clientId, brand, name, model, locals) {
 }
 
 /**
+ * Remote photo client_ids (out of the product's whole current remote set)
+ * no longer matched by any surviving local photo -- a removed photo
+ * pushing its own removal, the gap that let a photo deleted here linger on
+ * every other device forever (nothing ever told Supabase to delete it;
+ * cloudPushProduct only ever upserted whatever photosFor() currently
+ * returns). Mirrors CloudSyncManager.kt's remotePhotoClientIdsToDelete.
+ *
+ * Safe to run unconditionally in cloudPushProduct because
+ * pushWouldLoseToRemote has already passed for the product as a whole by
+ * the time this runs: this device's current photo set is the one that
+ * wins, so anything the cloud still has outside it belongs to a photo
+ * removed here. Pure and dependency-free; see PhotoSyncRemovalTest.js.
+ */
+function remotePhotoClientIdsToDelete(remoteClientIds, survivingClientIds) {
+  const surviving = new Set(survivingClientIds);
+  return remoteClientIds.filter((id) => !surviving.has(id));
+}
+
+/**
+ * Local photo ids no longer matched by anything in remoteClientIds -- the
+ * pull side of the same rule, so a photo removed on one device eventually
+ * disappears everywhere, not just there. Mirrors CloudSyncManager.kt's
+ * photosToRemoveLocally, id resolution included (a legacy-id photo's own
+ * local id doubles as its cloud identity until a push assigns it a real
+ * cloudClientId -- same reasoning as selectPullMatch above, for a photo).
+ *
+ * Only ever considers a photo whose cloudPushedSha256 is set (confirmed
+ * pushed to the cloud at least once, the same marker cloudPushProduct's own
+ * upload-skip check already uses): a photo just added locally, whose own
+ * push hasn't run yet, has no way to appear in remoteClientIds either, and
+ * this must never read that as "removed elsewhere" and delete a photo the
+ * owner only just added. Only called, in cloudPullAll, once the remote row
+ * has already been established as newer than the local one.
+ */
+function photosToRemoveLocally(localPhotos, remoteClientIds) {
+  const remote = new Set(remoteClientIds);
+  return localPhotos
+    .filter((p) => p.cloudPushedSha256)
+    .filter((p) => !remote.has(p.cloudClientId || p.id))
+    .map((p) => p.id);
+}
+
+/**
  * Pulls every remote product. A remote row newer than the matching local one
  * (or not seen locally yet) overwrites it; a locally-newer row is left alone
  * -- it will win on the next push instead. Remote deletions remove the local
@@ -457,6 +537,7 @@ async function cloudPullAll(onProgress) {
         headers,
         query: `product_id=eq.${rp.id}&select=*&order=sort_order.asc`
       });
+      const remoteClientIds = remotePhotos.filter((p) => p.client_id).map((p) => p.client_id);
       const existingPhotos = await photosFor(localId);
       // Same idea for photos: a legacy-id photo's client_id (its cloudClientId)
       // does not equal its local id, so map through both to find what is
@@ -466,6 +547,11 @@ async function cloudPullAll(onProgress) {
         localPhotoIdByCloudId.set(p.id, p.id);
         if (p.cloudClientId) localPhotoIdByCloudId.set(p.cloudClientId, p.id);
       });
+      // A photo removed on whichever device pushed this (newer) row must
+      // stop existing here too -- see photosToRemoveLocally's own comment
+      // for the cloudPushedSha256 guard that keeps this from ever touching
+      // a photo just added on this PC that hasn't had a chance to push yet.
+      const staleLocalPhotoIds = photosToRemoveLocally(existingPhotos, remoteClientIds);
 
       const newPhotos = [];
       for (const rphoto of remotePhotos) {
@@ -491,7 +577,9 @@ async function cloudPullAll(onProgress) {
         localPhotoIdByCloudId.set(rphoto.client_id, rphoto.client_id);
       }
 
-      let coverPhotoId = localProduct?.coverPhotoId ?? null;
+      let coverPhotoId = staleLocalPhotoIds.includes(localProduct?.coverPhotoId)
+        ? null
+        : localProduct?.coverPhotoId ?? null;
       if (rp.cover_photo_id != null) {
         const coverRemote = remotePhotos.find((x) => x.id === rp.cover_photo_id);
         if (coverRemote?.client_id) {
@@ -527,6 +615,7 @@ async function cloudPullAll(onProgress) {
       };
       await putProduct(product);
       if (newPhotos.length) await putPhotos(newPhotos);
+      for (const staleId of staleLocalPhotoIds) await deletePhoto(staleId);
       pulled++;
     } catch (error) {
       console.error('Cloud pull failed for', rp.client_id, error);
