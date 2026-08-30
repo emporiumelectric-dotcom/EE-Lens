@@ -532,6 +532,88 @@ function cleanDescription(raw, name = '') {
 }
 
 /**
+ * Adobe Commerce/Magento's own product gallery, read straight out of its
+ * x-magento-init JSON config -- present in full in the raw server-rendered
+ * HTML on every Magento storefront (the widget only needs JS to RENDER this
+ * data into the DOM, not to have the data exist in the first place; nothing
+ * here requires executing any script). Investigated on a real Havells
+ * product page (a Magento storefront) after the generic <img> sweep below
+ * was found to completely miss the product's own 9-photo detail carousel,
+ * offering only the page's separate colour-swatch thumbnails instead --
+ * neither the carousel's own <img> tags nor its real photo URLs appear
+ * anywhere in the static markup outside this JSON.
+ *
+ * Two different pieces, both inside x-magento-init blocks:
+ *  1. Magento_Swatches/js/swatch-renderer, targeted at the literal selector
+ *     "[data-role=swatch-options]" -- this exact selector is the standard
+ *     main-product swatch picker on every Magento product page. A
+ *     DIFFERENT selector shaped like "[data-role=swatch-option-<id>]"
+ *     belongs to an entirely different product shown elsewhere on the same
+ *     page (a related/upsell carousel) -- confirmed on the real page: that
+ *     block's own config carried a different product's own SKUs entirely,
+ *     which is exactly how unrelated products' photos were slipping into
+ *     "Images found" even after the tracking-pixel/banner fix. Only the
+ *     plain [data-role=swatch-options] block, never a swatch-option-<id>
+ *     one, is ever read here.
+ *  2. That config's own jsonConfig.attributes lists each configurable
+ *     attribute (colour, size, ...) by its own code ("color") and options
+ *     (each with an id and the productId(s) that option maps to);
+ *     jsonConfig.images maps each productId to its own real gallery array.
+ *
+ * The URL's own query string (?color=7399) is matched against whichever
+ * attribute's code equals that query key, to resolve exactly which product
+ * id -- and so which gallery -- the page is actually showing for this
+ * link. No match (no query param present, or nothing recognised) falls
+ * back to whichever product id jsonConfig.images lists first, rather than
+ * finding nothing: Magento's own default, not a guess at content.
+ *
+ * Returns [] (never throws) on anything not shaped this way -- a
+ * non-Magento site, or a Magento page whose swatch-renderer config this
+ * couldn't parse -- so extractProduct's own generic sweep is always the
+ * fallback, exactly as for the Atomberg adapter's own payload.
+ */
+function magentoGalleryImages(html, finalUrl) {
+  const initBlocks = [...html.matchAll(/<script[^>]+type=["']text\/x-magento-init["'][^>]*>([\s\S]*?)<\/script>/gi)]
+    .map((m) => m[1]);
+  const swatchBlock = initBlocks.find(
+    (b) => b.includes('[data-role=swatch-options]') && b.includes('Magento_Swatches/js/swatch-renderer')
+  );
+  if (!swatchBlock) return [];
+
+  let config;
+  try {
+    const parsed = JSON.parse(swatchBlock);
+    config = parsed['[data-role=swatch-options]']?.['Magento_Swatches/js/swatch-renderer']?.jsonConfig;
+  } catch {
+    return [];
+  }
+  if (!config?.images) return [];
+
+  let productId = null;
+  try {
+    const params = new URL(finalUrl).searchParams;
+    for (const attr of Object.values(config.attributes || {})) {
+      const value = params.get(attr.code);
+      if (!value) continue;
+      const option = (attr.options || []).find((o) => String(o.id) === value);
+      if (option?.products?.length) { productId = option.products[0]; break; }
+    }
+  } catch {
+    /* malformed finalUrl -- fall through to Magento's own default below */
+  }
+  if (!productId) productId = Object.keys(config.images)[0];
+
+  const gallery = config.images[productId];
+  if (!Array.isArray(gallery)) return [];
+
+  return gallery
+    .filter((entry) => entry && !entry.is_hidden)
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+    .map((entry) => entry.full || entry.img)
+    .filter(Boolean);
+}
+
+/**
  * Reads whatever the page is willing to say about the product.
  *
  * A field that cannot be read reliably is returned empty. A blank you fill in
@@ -565,35 +647,44 @@ function extractProduct(html, finalUrl) {
   const colour = firstString(product?.color) || '';
   const category = firstString(product?.category) || '';
 
-  // A generic full-page <img> sweep is the fallback of last resort: most
-  // shop pages have no reliable structured markup for "this is the
-  // product's own photo" versus "this is a tracking pixel, a site-wide
-  // promo banner, or an unrelated product shown elsewhere on the page" --
-  // so the checks below (1x1 pixels, IMAGE_NOISE, TRACKING_PIXEL_HOSTS) are
-  // what's actually available, not a guess at what would be ideal. Real
-  // finding, not hypothetical: a Havells product page's "14 found" included
-  // a Facebook conversion pixel and five site-wide sub-brand/promo banners
-  // (Havells Studio, Lloyd, Crabtree, REO, "One App Advantage"), none of
-  // them catchable by a filename-keyword check alone -- the pixel is caught
+  // magentoGalleryImages goes first and is the real, structured answer on
+  // any Magento storefront: it already knows which photos are this exact
+  // product's own, in the shop's own stated order, colour-variant-aware --
+  // no filtering needed, and pushed first so the generic sweep below (which
+  // still runs, and still helps on any other site) can never crowd it out
+  // of the MAX_IMAGE_CANDIDATES cap.
+  //
+  // That generic full-page <img> sweep is the fallback of last resort for
+  // everywhere else: most shop pages have no reliable structured markup for
+  // "this is the product's own photo" versus "this is a tracking pixel, a
+  // site-wide promo banner, or an unrelated product shown elsewhere on the
+  // page" -- so the checks below (1x1 pixels, IMAGE_NOISE,
+  // TRACKING_PIXEL_HOSTS) are what's actually available there, not a guess
+  // at what would be ideal. Real findings, not hypothetical, both from the
+  // same real Havells product page: its "14 found" included a Facebook
+  // conversion pixel and five site-wide sub-brand/promo banners (Havells
+  // Studio, Lloyd, Crabtree, REO, "One App Advantage"), none of them
+  // catchable by a filename-keyword check alone -- the pixel is caught
   // above by its own width="1" height="1" attributes (and, belt-and-
   // suspenders, its facebook.com hostname), the banners by their shared
-  // /media/wysiwyg/ path (Adobe Commerce/Magento's CMS-block asset folder,
-  // never real catalogue photos, which live under /media/catalog/product/).
-  // What this sweep still cannot tell apart on that same page: its own
-  // product photos from OTHER products' photos shown elsewhere on the page
-  // (a "you may also like" carousel, say) -- both live under that identical
-  // /media/catalog/product/ path with no further signal in the raw HTML
-  // that says which product a given photo belongs to. A tighter fix needs
-  // either the shop's own gallery-widget JSON (the same kind of site-
-  // specific payload the Atomberg adapter reads, not investigated here) or
-  // rendering the page in a real browser -- both a materially heavier tool
-  // than this file, so left as an honest, open gap rather than a fragile
-  // guess: a CSS-class heuristic ("prefer images inside anything classed
-  // .gallery") was tried and rejected here after live testing showed it
-  // sweeps in exactly as many wrong-product photos as it excludes, since
-  // Magento's generic thumbnail class is used sitewide, not just on a
-  // product's own gallery.
+  // /media/wysiwyg/ path (Magento's CMS-block asset folder, never real
+  // catalogue photos, which live under /media/catalog/product/) -- and,
+  // once those were fixed, the product's own 9-photo detail carousel
+  // turned out to be missing entirely, with only the page's separate
+  // colour-swatch thumbnails showing up instead: neither the carousel's
+  // own markup nor its real photo URLs exist anywhere in the static HTML
+  // outside the Magento gallery JSON magentoGalleryImages reads, which is
+  // what closes that gap. A non-Magento site with the same "which photos
+  // on this page are THIS product's, not some other one shown alongside
+  // it" problem has no equivalent fix here -- rendering the page in a real
+  // browser is the only way to tell that apart in general, and a
+  // materially heavier tool than this file. A CSS-class heuristic ("prefer
+  // images inside anything classed .gallery") was tried and rejected for
+  // that generic case after live testing showed it sweeps in exactly as
+  // many wrong-product photos as it excludes, since a generic thumbnail
+  // class is commonly used site-wide, not just on a product's own gallery.
   const rawImages = [];
+  rawImages.push(...magentoGalleryImages(html, finalUrl));
   collectImages(product?.image, rawImages);
   const og = meta(doc, 'og:image', 'twitter:image');
   if (og) rawImages.push(og);
