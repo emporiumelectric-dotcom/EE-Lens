@@ -614,6 +614,37 @@ function magentoGalleryImages(html, finalUrl) {
 }
 
 /**
+ * This page's own product SKU, read from whichever real, ground-truth
+ * source states it -- never a guess. Tried in order: the standard
+ * schema.org [itemprop="sku"] microdata (not Magento-specific, works on
+ * any platform that publishes it); Magento's own add-to-cart form
+ * attribute, data-product-sku (present on every Magento product page
+ * regardless of theme, independent of whether the product has any
+ * colour/size swatches at all); JSON-LD's own sku/mpn field, already read
+ * elsewhere in extractProduct as part of `model`.
+ *
+ * A trailing "-c" (Magento's own marker for a configurable parent SKU,
+ * e.g. "FHCIL5SSAB48-c") is stripped before matching -- real image
+ * filenames never carry it, only the parent form attribute does.
+ *
+ * See its one call site's comment for why this exists: a real product's
+ * own catalogue photo filenames are reliably derived from its own SKU, so
+ * this is what lets the generic image sweep tell "this product's own
+ * photo" apart from a different product's, shown elsewhere on the same
+ * page, without needing the Magento gallery JSON magentoGalleryImages
+ * reads (which only exists for a *configurable* product with swatches --
+ * a simple product with none has no such JSON to read at all).
+ */
+function pageProductSku(doc, html, product) {
+  const microdata = textOf(doc.querySelector('[itemprop="sku"]'));
+  if (microdata) return microdata.trim().replace(/-c$/i, '').toLowerCase();
+  const formAttr = html.match(/data-product-sku=["']([^"']+)["']/i);
+  if (formAttr) return formAttr[1].trim().replace(/-c$/i, '').toLowerCase();
+  const structured = firstString(product?.sku) || firstString(product?.mpn);
+  return structured ? structured.trim().replace(/-c$/i, '').toLowerCase() : null;
+}
+
+/**
  * Reads whatever the page is willing to say about the product.
  *
  * A field that cannot be read reliably is returned empty. A blank you fill in
@@ -648,46 +679,56 @@ function extractProduct(html, finalUrl) {
   const category = firstString(product?.category) || '';
 
   // magentoGalleryImages goes first and is the real, structured answer on
-  // any Magento storefront: it already knows which photos are this exact
-  // product's own, in the shop's own stated order, colour-variant-aware --
-  // no filtering needed, and pushed first so the generic sweep below (which
-  // still runs, and still helps on any other site) can never crowd it out
-  // of the MAX_IMAGE_CANDIDATES cap.
+  // a *configurable* Magento product (one sold with swatches -- colour,
+  // size, ...): it already knows which photos are this exact variant's
+  // own, in the shop's own stated order, pushed first so the generic sweep
+  // below (which still runs, and still helps on any other site) can never
+  // crowd it out of the MAX_IMAGE_CANDIDATES cap. It has nothing to read on
+  // a *simple* product with no swatches at all -- confirmed on a second
+  // real Havells page ("Florette UL BLDC Smartsense Ceiling Fan"): no
+  // [data-role=swatch-options] block exists there, so it correctly returns
+  // [] rather than guessing, exactly as designed -- but that page still hit
+  // the exact same underlying problem the generic sweep has never solved:
+  // its "14 found" were ALL a completely different fan model, because nothing
+  // in the sweep could tell "this product's own photo" apart from "a
+  // different product's photo, shown elsewhere on this same page" (a "you
+  // may also like" carousel, most likely) any better than it originally
+  // could for the tracking pixel and promo banners.
   //
-  // That generic full-page <img> sweep is the fallback of last resort for
-  // everywhere else: most shop pages have no reliable structured markup for
-  // "this is the product's own photo" versus "this is a tracking pixel, a
-  // site-wide promo banner, or an unrelated product shown elsewhere on the
-  // page" -- so the checks below (1x1 pixels, IMAGE_NOISE,
-  // TRACKING_PIXEL_HOSTS) are what's actually available there, not a guess
-  // at what would be ideal. Real findings, not hypothetical, both from the
-  // same real Havells product page: its "14 found" included a Facebook
-  // conversion pixel and five site-wide sub-brand/promo banners (Havells
-  // Studio, Lloyd, Crabtree, REO, "One App Advantage"), none of them
-  // catchable by a filename-keyword check alone -- the pixel is caught
-  // above by its own width="1" height="1" attributes (and, belt-and-
-  // suspenders, its facebook.com hostname), the banners by their shared
-  // /media/wysiwyg/ path (Magento's CMS-block asset folder, never real
-  // catalogue photos, which live under /media/catalog/product/) -- and,
-  // once those were fixed, the product's own 9-photo detail carousel
-  // turned out to be missing entirely, with only the page's separate
-  // colour-swatch thumbnails showing up instead: neither the carousel's
-  // own markup nor its real photo URLs exist anywhere in the static HTML
-  // outside the Magento gallery JSON magentoGalleryImages reads, which is
-  // what closes that gap. A non-Magento site with the same "which photos
-  // on this page are THIS product's, not some other one shown alongside
-  // it" problem has no equivalent fix here -- rendering the page in a real
-  // browser is the only way to tell that apart in general, and a
-  // materially heavier tool than this file. A CSS-class heuristic ("prefer
-  // images inside anything classed .gallery") was tried and rejected for
-  // that generic case after live testing showed it sweeps in exactly as
-  // many wrong-product photos as it excludes, since a generic thumbnail
-  // class is commonly used site-wide, not just on a product's own gallery.
+  // pageSku (below) is what actually closes that gap, generally, not just
+  // for Magento: a real product photo's filename is reliably derived from
+  // its own SKU on every platform checked so far, so a different product
+  // shown alongside it carries a different SKU in its own filename instead
+  // -- unlike a CSS class (reused site-wide for every product's thumbnail;
+  // tried and rejected here already for exactly that reason), a SKU is a
+  // direct identity match, not a fuzzy visual-role guess. Applied only to
+  // the generic sweep's own candidates below (genericSweepImages), never to
+  // magentoGalleryImages' output, which has already resolved the exact
+  // right coloured variant via its own JSON and can legitimately carry a
+  // different (but related) SKU suffix than the page's own parent SKU.
+  //
+  // Real findings, not hypothetical, both from real Havells product pages:
+  // "14 found" once included a Facebook conversion pixel and five
+  // site-wide sub-brand/promo banners (Havells Studio, Lloyd, Crabtree,
+  // REO, "One App Advantage"), none of them catchable by a filename-
+  // keyword check alone -- the pixel is caught above by its own
+  // width="1" height="1" attributes (and, belt-and-suspenders, its
+  // facebook.com hostname), the banners by their shared /media/wysiwyg/
+  // path (Magento's CMS-block asset folder, never real catalogue photos,
+  // which live under /media/catalog/product/). A site with the same
+  // "which photos on this page are THIS product's" problem but no SKU
+  // stated anywhere reliable has no fix here -- rendering the page in a
+  // real browser is the only way to tell that apart in full generality,
+  // and a materially heavier tool than this file.
+  const pageSku = pageProductSku(doc, html, product);
+
   const rawImages = [];
   rawImages.push(...magentoGalleryImages(html, finalUrl));
   collectImages(product?.image, rawImages);
   const og = meta(doc, 'og:image', 'twitter:image');
   if (og) rawImages.push(og);
+
+  const genericSweepImages = [];
   for (const img of doc.querySelectorAll('img')) {
     // A 1x1 image is the textbook tracking-pixel shape (Facebook, Google
     // Analytics, and most ad networks all size their pixel this way) --
@@ -696,13 +737,21 @@ function extractProduct(html, finalUrl) {
     // recognising the hosting domain by name.
     if (img.getAttribute('width') === '1' && img.getAttribute('height') === '1') continue;
     const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-    if (src) rawImages.push(src);
+    if (src) genericSweepImages.push(src);
     const srcset = img.getAttribute('srcset');
     if (srcset) {
       const best = srcset.split(',').map((s) => s.trim().split(/\s+/)[0]).filter(Boolean).pop();
-      if (best) rawImages.push(best);
+      if (best) genericSweepImages.push(best);
     }
   }
+  // Prefer generic-sweep candidates whose own filename carries this page's
+  // own SKU, when one is known -- falls back to the full, unfiltered sweep
+  // when the SKU is unknown, or when nothing in the sweep happens to
+  // match it (a shop that names files by internal numeric id instead,
+  // say), so this can only ever narrow the result, never discard every
+  // candidate outright.
+  const skuMatchedImages = pageSku ? genericSweepImages.filter((raw) => raw.toLowerCase().includes(pageSku)) : [];
+  rawImages.push(...(skuMatchedImages.length ? skuMatchedImages : genericSweepImages));
 
   const seen = new Set();
   const images = [];
