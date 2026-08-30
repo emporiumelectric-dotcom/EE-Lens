@@ -223,6 +223,24 @@ async function main() {
   const skuMatches = [...new Set([...html.matchAll(/\/([a-z0-9_]*fhcil5s[a-z0-9_]*\.(?:jpg|png|webp))/gi)].map((m) => m[1]))];
   log(`Distinct filenames anywhere in the HTML matching this product's own SKU family (fhcil5s) (${skuMatches.length})`, skuMatches);
 
+  // Do the words the user says they saw as VALUES ("1200", "230", "BLDC",
+  // "5" star) appear ANYWHERE in the raw HTML at all -- in any tag shape,
+  // not just a <tr>/<dl> extractSpecs already reads -- or are they genuinely
+  // absent from this server-rendered page? And does Magento's own
+  // x-magento-init JSON-config mechanism (the same class of thing Atomberg's
+  // adapter reads from self.__next_f.push) carry the real gallery/specs data
+  // instead of plain <img>/<table> tags?
+  log('Literal "Air delivery" appears in raw HTML?', html.includes('Air delivery') || html.includes('Air Delivery'));
+  log('Literal "BLDC" appears in raw HTML?', html.includes('BLDC'));
+  log('Literal "230 m" appears in raw HTML?', html.includes('230 m') || html.includes('230m'));
+  log('"x-magento-init" script blocks found', [...html.matchAll(/type=["']text\/x-magento-init["']/gi)].length);
+  log('"mage/gallery/gallery" mentioned?', html.includes('mage/gallery/gallery'));
+  log('"gallery-placeholder" total occurrences (any context)', (html.match(/gallery-placeholder/gi) || []).length);
+  const galleryInitMatch = html.match(/gallery-placeholder["'][\s\S]{0,2000}/);
+  log('2000 chars of raw HTML right after the first "gallery-placeholder" mention', galleryInitMatch ? galleryInitMatch[0] : '(not found)');
+  const tabsMatch = html.match(/additional[\s\S]{0,10}information[\s\S]{0,800}/i) || html.match(/data-role=["']content["'][\s\S]{0,800}/i);
+  log('Raw snippet near "additional information" / tab content marker', tabsMatch ? tabsMatch[0] : '(not found)');
+
   const noscriptBlocks = [...html.matchAll(/<noscript>([\s\S]*?)<\/noscript>/gi)].slice(0, 5).map((m) => m[1].slice(0, 300));
   log('First 5 <noscript> blocks (truncated 300 chars)', noscriptBlocks);
 
