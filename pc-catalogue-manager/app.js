@@ -1685,4 +1685,8 @@ function wire() {
   // updates on its own, but the rest of startup -- and the locally-saved
   // catalogue already rendered above -- must never wait on the network for it.
   cloudAutoPull();
+  // Also not awaited, same reasoning: retries any push a previous page left
+  // unfinished (e.g. a refresh that landed mid-upload) instead of leaving
+  // "Last pushed" stuck stale forever. See cloudCatchUpPush's own comment.
+  cloudCatchUpPush();
 })();
