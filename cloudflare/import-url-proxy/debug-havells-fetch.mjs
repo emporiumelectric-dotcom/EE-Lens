@@ -169,6 +169,35 @@ async function main() {
   const firstImgTags = [...html.matchAll(/<img\b[^>]*>/gi)].slice(0, 25).map((m) => m[0]);
   log('First 25 raw <img> tags (verbatim)', firstImgTags);
 
+  // Testing the fix under consideration: how many <img> tags anywhere on the
+  // page are gallery-scoped (self or an ancestor's class/id mentions
+  // "gallery" or "product-image"), and what do their src values look like?
+  // No real DOM/closest() available in plain Node, so this approximates
+  // "ancestor" with a purely textual heuristic: an <img ...gallery...> tag
+  // directly, OR one whose nearest enclosing element (last unclosed tag
+  // before it, scanned backwards) mentions gallery/product-image. Good
+  // enough to sanity-check the yield before writing the real DOM-based
+  // version in import-url.js itself.
+  const GALLERY_MARK = /gallery|product-image/i;
+  const galleryScoped = [];
+  for (const tagMatch of html.matchAll(/<img\b[^>]*>/gi)) {
+    const tag = tagMatch[0];
+    const idx = tagMatch.index;
+    const selfScoped = GALLERY_MARK.test(tag);
+    // Cheap approximation of "nearest enclosing element mentions gallery":
+    // just check whether the word appears at all in a short window right
+    // before this tag (a real ancestor-class check needs a real DOM, done
+    // properly with Element.closest() in the actual import-url.js fix --
+    // this is only here to sanity-check the likely yield before writing that).
+    const windowBefore = html.slice(Math.max(0, idx - 800), idx);
+    const ancestorScoped = !selfScoped && GALLERY_MARK.test(windowBefore);
+    if (selfScoped || ancestorScoped) {
+      const srcMatch = tag.match(/\bsrc=["']([^"']*)["']/i) || tag.match(/\bdata-src=["']([^"']*)["']/i);
+      galleryScoped.push({ src: srcMatch ? srcMatch[1] : null, selfScoped, ancestorScoped });
+    }
+  }
+  log(`Gallery-scoped <img> tags found (${galleryScoped.length})`, galleryScoped);
+
   const noscriptBlocks = [...html.matchAll(/<noscript>([\s\S]*?)<\/noscript>/gi)].slice(0, 5).map((m) => m[1].slice(0, 300));
   log('First 5 <noscript> blocks (truncated 300 chars)', noscriptBlocks);
 
