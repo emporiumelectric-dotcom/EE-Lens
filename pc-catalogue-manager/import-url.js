@@ -8,8 +8,20 @@
  * DOMParser does not run scripts or load subresources, so parsing here is inert.
  */
 
-const IMAGE_NOISE = /(logo|icon|sprite|placeholder|banner|thumb_?nail_?blank|1x1|pixel|badge|payment|footer|header)/i;
+const IMAGE_NOISE = /(logo|icon|sprite|placeholder|banner|thumb_?nail_?blank|1x1|pixel|badge|payment|footer|header|\/wysiwyg\/)/i;
 const MAX_IMAGE_CANDIDATES = 14;
+
+/**
+ * Known analytics/ad-tracking hosts, matched against a candidate image URL's
+ * own hostname -- real finding, not a guess: a real Havells product page's
+ * "14 found" candidates included a Facebook conversion-tracking pixel
+ * (facebook.com/tr?id=...), collected because it's a perfectly ordinary
+ * <img> tag the generic sweep below has no other reason to doubt. Checked
+ * against the URL's hostname specifically, not a substring match anywhere in
+ * it, so a real shop's own domain merely containing one of these words in
+ * passing is never falsely excluded.
+ */
+const TRACKING_PIXEL_HOSTS = /(^|\.)(facebook\.com|doubleclick\.net|google-analytics\.com|googletagmanager\.com|googlesyndication\.com|adnxs\.com|criteo\.com|hotjar\.com|bat\.bing\.com)$/i;
 
 /**
  * server.py's local helper only ever listens on this same PC, so it exists
@@ -93,6 +105,11 @@ function absolute(href, base) {
   try { return new URL(href, base).href; } catch { return null; }
 }
 
+/** True when [url]'s own hostname is a known analytics/ad-tracking pixel host -- see TRACKING_PIXEL_HOSTS. */
+function isTrackingPixelUrl(url) {
+  try { return TRACKING_PIXEL_HOSTS.test(new URL(url).hostname); } catch { return false; }
+}
+
 function textOf(node) {
   return (node?.textContent || '').replace(/\s+/g, ' ').trim();
 }
@@ -140,7 +157,24 @@ function collectImages(value, out) {
   if (typeof value === 'object') collectImages(value.url || value.contentUrl, out);
 }
 
-/** Key/value rows from specification tables and definition lists. */
+/**
+ * Key/value rows from specification tables and definition lists.
+ *
+ * A real, permanent gap this cannot close, in the same spirit as
+ * mrpFromText's own documented one: a shop that states its specs only as
+ * unlabelled marketing prose -- bullet points like "Superior air delivery
+ * of 230 m³/min" rather than a "Air delivery: 230 m³/min" row -- has
+ * nothing here in the shape this function looks for, and it correctly
+ * returns nothing rather than guess. Confirmed on a real Havells product
+ * page: its spec-sounding content lives entirely in <li> bullets under a
+ * "Key Features" heading, not a single <tr>/<dl> anywhere on the page, so
+ * every field the category's own template asks for (see templateFor) shows
+ * up as an honest blank to fill in by hand -- not a bug, and not something
+ * readSpecsFromText's narrow numeric-pattern matching (built for name/
+ * description text, not open marketing prose) should be stretched to cover
+ * without risking exactly the kind of confident-wrong-value this file's own
+ * header comment warns against.
+ */
 function extractSpecs(doc) {
   const specs = {};
   const add = (k, v) => {
@@ -531,11 +565,45 @@ function extractProduct(html, finalUrl) {
   const colour = firstString(product?.color) || '';
   const category = firstString(product?.category) || '';
 
+  // A generic full-page <img> sweep is the fallback of last resort: most
+  // shop pages have no reliable structured markup for "this is the
+  // product's own photo" versus "this is a tracking pixel, a site-wide
+  // promo banner, or an unrelated product shown elsewhere on the page" --
+  // so the checks below (1x1 pixels, IMAGE_NOISE, TRACKING_PIXEL_HOSTS) are
+  // what's actually available, not a guess at what would be ideal. Real
+  // finding, not hypothetical: a Havells product page's "14 found" included
+  // a Facebook conversion pixel and five site-wide sub-brand/promo banners
+  // (Havells Studio, Lloyd, Crabtree, REO, "One App Advantage"), none of
+  // them catchable by a filename-keyword check alone -- the pixel is caught
+  // above by its own width="1" height="1" attributes (and, belt-and-
+  // suspenders, its facebook.com hostname), the banners by their shared
+  // /media/wysiwyg/ path (Adobe Commerce/Magento's CMS-block asset folder,
+  // never real catalogue photos, which live under /media/catalog/product/).
+  // What this sweep still cannot tell apart on that same page: its own
+  // product photos from OTHER products' photos shown elsewhere on the page
+  // (a "you may also like" carousel, say) -- both live under that identical
+  // /media/catalog/product/ path with no further signal in the raw HTML
+  // that says which product a given photo belongs to. A tighter fix needs
+  // either the shop's own gallery-widget JSON (the same kind of site-
+  // specific payload the Atomberg adapter reads, not investigated here) or
+  // rendering the page in a real browser -- both a materially heavier tool
+  // than this file, so left as an honest, open gap rather than a fragile
+  // guess: a CSS-class heuristic ("prefer images inside anything classed
+  // .gallery") was tried and rejected here after live testing showed it
+  // sweeps in exactly as many wrong-product photos as it excludes, since
+  // Magento's generic thumbnail class is used sitewide, not just on a
+  // product's own gallery.
   const rawImages = [];
   collectImages(product?.image, rawImages);
   const og = meta(doc, 'og:image', 'twitter:image');
   if (og) rawImages.push(og);
   for (const img of doc.querySelectorAll('img')) {
+    // A 1x1 image is the textbook tracking-pixel shape (Facebook, Google
+    // Analytics, and most ad networks all size their pixel this way) --
+    // real product photos are never this size, so this is safe to drop
+    // outright rather than lean on IMAGE_NOISE/TRACKING_PIXEL_HOSTS
+    // recognising the hosting domain by name.
+    if (img.getAttribute('width') === '1' && img.getAttribute('height') === '1') continue;
     const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
     if (src) rawImages.push(src);
     const srcset = img.getAttribute('srcset');
@@ -552,6 +620,7 @@ function extractProduct(html, finalUrl) {
     if (!url || seen.has(url)) continue;
     if (/\.svg(\?|$)/i.test(url)) continue;
     if (IMAGE_NOISE.test(url)) continue;
+    if (isTrackingPixelUrl(url)) continue;
     seen.add(url);
     images.push(url);
     if (images.length >= MAX_IMAGE_CANDIDATES) break;
