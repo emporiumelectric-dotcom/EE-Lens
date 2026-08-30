@@ -360,6 +360,51 @@ class BackupViewModel(
 
     fun consumeCloudMessage() = _state.update { it.copy(cloudMessage = null) }
 
+    /**
+     * Manual override: forces a push of every local product right now,
+     * without waiting for the automatic save-time push to fire (or working,
+     * if it doesn't -- see CloudSyncManager.PUSH_TAG in logcat for exactly
+     * why, on either path). Calls the same repository.cloudPushAll used by
+     * the automatic flow -- this is a manual trigger for it, not a separate
+     * code path.
+     */
+    fun pushNow() {
+        _state.update { it.copy(cloudBusy = true, cloudBusyMessage = "Pushing to the cloud…", cloudMessage = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.cloudPushAll { done, total ->
+                        _state.update { it.copy(cloudBusyMessage = "Pushing — $done of $total") }
+                    }
+                }
+            }.onSuccess { summary ->
+                val lastPush = repository.cloudLastPushAt()
+                _state.update {
+                    it.copy(
+                        cloudBusy = false,
+                        cloudLastPushAt = lastPush,
+                        cloudMessageIsProblem = summary.failed > 0,
+                        cloudMessage = if (summary.failed > 0) {
+                            "Pushed ${summary.processed} of ${summary.total} products — " +
+                                "${summary.failed} failed. See logcat (tag CloudPushTrace) for why."
+                        } else {
+                            "Pushed ${summary.processed} of ${summary.total} products."
+                        }
+                    )
+                }
+            }.onFailure { error ->
+                Log.e(TAG, "Manual push failed", error)
+                _state.update {
+                    it.copy(
+                        cloudBusy = false,
+                        cloudMessageIsProblem = true,
+                        cloudMessage = error.message ?: "The push could not be completed."
+                    )
+                }
+            }
+        }
+    }
+
     /* ---------- app updates ---------- */
 
     fun checkForUpdate() {

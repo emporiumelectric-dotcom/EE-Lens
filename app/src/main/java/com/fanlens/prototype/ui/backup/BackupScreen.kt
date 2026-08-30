@@ -239,6 +239,19 @@ fun BackupScreen(viewModel: BackupViewModel) {
             Text(if (state.cloudSignedIn) "Sign out of the cloud" else "Sign in to push changes")
         }
 
+        if (state.cloudSignedIn) {
+            TextButton(
+                onClick = viewModel::pushNow,
+                enabled = !state.cloudBusy
+            ) { Text("Push now (manual override)", color = FanLensColors.InkMuted) }
+            Text(
+                "Only needed to force a push immediately -- pushing normally happens on its own " +
+                    "right after you save.",
+                style = MaterialTheme.typography.labelSmall,
+                color = FanLensColors.InkMuted
+            )
+        }
+
         if (state.cloudBusy) {
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {

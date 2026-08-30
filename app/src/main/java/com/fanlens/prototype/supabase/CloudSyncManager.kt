@@ -60,6 +60,7 @@ class CloudSyncManager(
         val session = authClient.ensureFreshSession()
             ?: throw SupabaseAuthException("Sign in to push to the cloud.")
         val all = database.productDao().allIncludingDeleted()
+        Log.d(PUSH_TAG, "pushAll start as=${session.email} count=${all.size}")
         var processed = 0
         var failed = 0
         all.forEachIndexed { index, product ->
@@ -69,9 +70,11 @@ class CloudSyncManager(
                 processed++
             } catch (error: Throwable) {
                 failed++
+                Log.e(PUSH_TAG, "pushAll: pushProduct FAILED for localId=${product.id}", error)
             }
         }
         onProgress(all.size, all.size)
+        Log.d(PUSH_TAG, "pushAll done processed=$processed failed=$failed total=${all.size}")
         return SyncSummary(processed, failed, all.size)
     }
 
@@ -84,7 +87,12 @@ class CloudSyncManager(
      * can still mean: last-write-wins may skip the actual upsert).
      */
     suspend fun pushOne(product: ProductEntity): Boolean {
-        val session = authClient.ensureFreshSession() ?: return false
+        val session = authClient.ensureFreshSession()
+        if (session == null) {
+            Log.d(PUSH_TAG, "pushOne SKIPPED localId=${product.id}: not signed in (no session)")
+            return false
+        }
+        Log.d(PUSH_TAG, "pushOne localId=${product.id} as=${session.email}")
         pushProduct(session.accessToken, product)
         return true
     }
@@ -151,6 +159,11 @@ class CloudSyncManager(
 
     private suspend fun pushProduct(accessToken: String, product: ProductEntity) {
         val clientId = resolveProductClientId(product)
+        Log.d(
+            PUSH_TAG,
+            "pushProduct start localId=${product.id} clientId=$clientId " +
+                "deletedLocally=${product.deletedAt != null} localUpdatedAt=${product.updatedAt}"
+        )
 
         // Last-write-wins, made explicit: never overwrite a remote edit made
         // after this one. If the cloud row is already at least as new, this
@@ -159,11 +172,22 @@ class CloudSyncManager(
         // prompt. See pushWouldLoseToRemote (PC's equivalent) and
         // PushConflictPolicyTest.
         val remoteUpdatedAt = sync.fetchRemoteUpdatedAt(accessToken, clientId)
-        if (pushWouldLoseToRemote(remoteUpdatedAt?.let(::fromIso), product.updatedAt)) return
+        if (pushWouldLoseToRemote(remoteUpdatedAt?.let(::fromIso), product.updatedAt)) {
+            Log.d(
+                PUSH_TAG,
+                "pushProduct SKIPPED (last-write-wins) clientId=$clientId " +
+                    "remoteUpdatedAt=$remoteUpdatedAt localUpdatedAt=${product.updatedAt}"
+            )
+            return
+        }
 
         val body = productToRemoteJson(product, clientId)
         val saved = sync.upsertProduct(accessToken, body)
-        if (product.deletedAt != null) return // a deleted product has nothing else worth syncing
+        Log.d(PUSH_TAG, "pushProduct upserted product row clientId=$clientId remoteId=${saved.optLong("id", -1)}")
+        if (product.deletedAt != null) {
+            Log.d(PUSH_TAG, "pushProduct SUCCESS clientId=$clientId: product deleted locally, no photos to sync")
+            return // a deleted product has nothing else worth syncing
+        }
 
         val remoteId = saved.getLong("id")
         val photos = database.photoDao().forProduct(product.id)
@@ -172,30 +196,60 @@ class CloudSyncManager(
         for (photo in photos) {
             val photoClientId = resolvePhotoClientId(photo)
             survivingClientIds += photoClientId
-            val photoBody = JSONObject()
-                .put("client_id", photoClientId)
-                .put("product_id", remoteId)
-                .put("role", localRoleToCloud(photo.role))
-                .put("sort_order", photo.sortOrder)
-                .put("checksum", photo.sha256)
+            // The storage path is keyed by clientId/photoClientId (the cloud
+            // identity), never product.id/photo.id (the local one) -- a
+            // legacy-id product's local id is a fixed slug like
+            // "havells-stealth-air-pearl-white", not something a pulling
+            // device can ever reconstruct on its own. It is a pure function
+            // of those two ids, so it is the exact same value on every push
+            // of this photo -- always included below, whether or not bytes
+            // are uploaded this time.
+            //
+            // It used to be left OUT of the upsert body whenever
+            // photo.syncedAt was already set, on the theory that omitting a
+            // column on a repeat push meant "leave whatever is already
+            // there alone". That is not how PostgREST's
+            // resolution=merge-duplicates upsert behaves: an omitted key is
+            // not "don't touch this column" -- PostgREST still builds a
+            // full row for the ON CONFLICT DO UPDATE, and an omitted column
+            // with no default (storage_path has none) is written as NULL.
+            // storage_path is NOT NULL, so this 400'd on Postgres's own
+            // constraint -- silently, since cloudBackgroundPush swallows
+            // the exception and just never records a "last pushed" time.
+            // That made every second-or-later push of any product with at
+            // least one already-synced photo fail outright, not just a
+            // photo-removal edit. See CloudSyncManagerTest for the repro
+            // and pc-catalogue-manager/cloud.js's cloudPushProduct for the
+            // mirrored fix on the PC side.
+            val storagePath = SupabaseSyncClient.photoStoragePath(clientId, photoClientId)
+            val photoBody = photoUpsertBody(
+                photoClientId = photoClientId,
+                remoteProductId = remoteId,
+                cloudRole = localRoleToCloud(photo.role),
+                sortOrder = photo.sortOrder,
+                checksum = photo.sha256,
+                storagePath = storagePath
+            )
             if (photo.syncedAt == null) {
-                // The storage path is keyed by clientId/photoClientId (the
-                // cloud identity), never product.id/photo.id (the local
-                // one) -- a legacy-id product's local id is a fixed slug
-                // like "havells-stealth-air-pearl-white", not something a
-                // pulling device can ever reconstruct on its own. storage_
-                // path is only ever set here, the one place bytes actually
-                // land at that path; an already-synced photo below leaves
-                // it out of the upsert body entirely so a repeat push can
-                // never point the row at a path nothing was written to.
+                Log.d(PUSH_TAG, "pushProduct uploading photo bytes clientId=$clientId photoClientId=$photoClientId path=$storagePath")
                 val bytes = photoStore.fullFile(product.id, photo.id).readBytes()
                 sync.uploadPhoto(accessToken, clientId, photoClientId, bytes)
-                photoBody.put("storage_path", SupabaseSyncClient.photoStoragePath(clientId, photoClientId))
             }
-            val savedPhoto = sync.upsertPhoto(accessToken, photoBody)
+            val savedPhoto = try {
+                sync.upsertPhoto(accessToken, photoBody)
+            } catch (error: Throwable) {
+                Log.e(
+                    PUSH_TAG,
+                    "pushProduct photo upsert FAILED clientId=$clientId photoClientId=$photoClientId " +
+                        "syncedAt=${photo.syncedAt} body=$photoBody",
+                    error
+                )
+                throw error
+            }
             remotePhotoIdByLocalId[photo.id] = savedPhoto.getLong("id")
             if (photo.syncedAt == null) database.photoDao().setSyncedAt(photo.id, System.currentTimeMillis())
         }
+        Log.d(PUSH_TAG, "pushProduct upserted ${photos.size} photo row(s) clientId=$clientId")
 
         // A photo removed locally must stop existing in the cloud too --
         // see remotePhotoClientIdsToDelete's doc comment for why this is
@@ -207,7 +261,11 @@ class CloudSyncManager(
             .map { remotePhotos.getJSONObject(it) }
             .filter { it.optString("client_id").isNotBlank() }
             .associateBy { it.getString("client_id") }
-        for (staleClientId in remotePhotoClientIdsToDelete(remoteRowByClientId.keys, survivingClientIds)) {
+        val staleClientIds = remotePhotoClientIdsToDelete(remoteRowByClientId.keys, survivingClientIds)
+        if (staleClientIds.isNotEmpty()) {
+            Log.d(PUSH_TAG, "pushProduct deleting ${staleClientIds.size} stale remote photo(s) clientId=$clientId ids=$staleClientIds")
+        }
+        for (staleClientId in staleClientIds) {
             val staleRow = remoteRowByClientId.getValue(staleClientId)
             staleRow.optString("storage_path").takeIf { it.isNotBlank() }
                 ?.let { sync.deletePhotoObject(accessToken, it) }
@@ -217,8 +275,10 @@ class CloudSyncManager(
         val coverRemoteId = product.coverPhotoId?.let { remotePhotoIdByLocalId[it] }
         val currentRemoteCover = if (saved.isNull("cover_photo_id")) null else saved.getLong("cover_photo_id")
         if (coverRemoteId != currentRemoteCover) {
+            Log.d(PUSH_TAG, "pushProduct updating cover_photo_id clientId=$clientId $currentRemoteCover -> $coverRemoteId")
             sync.upsertProduct(accessToken, body.put("cover_photo_id", coverRemoteId ?: JSONObject.NULL))
         }
+        Log.d(PUSH_TAG, "pushProduct SUCCESS clientId=$clientId remoteId=$remoteId")
     }
 
     /** Resolves this product's client_id, persisting a freshly generated one so it is stable next time. */
@@ -419,6 +479,16 @@ class CloudSyncManager(
     companion object {
         private const val TAG = "CloudSyncManager"
 
+        /**
+         * Distinct, greppable tag for every decision point in the push path
+         * (pushAll / pushOne / pushProduct), separate from [TAG] (pull-side
+         * logging) so `adb logcat -s CloudPushTrace` on its own shows the
+         * full story of a real push attempt end to end -- what a
+         * cloudBackgroundPush failure used to give no visibility into
+         * beyond "Cloud push failed for <id>" and a stack trace.
+         */
+        internal const val PUSH_TAG = "CloudPushTrace"
+
         private val UUID_REGEX = Regex(
             "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
         )
@@ -527,6 +597,32 @@ internal fun selectPullMatch(
             it.model.equals(model, ignoreCase = true)
     }
 }
+
+/**
+ * The JSON body pushProduct upserts for one photo. Pulled out as its own
+ * pure, dependency-free function -- see CloudSyncManagerTest -- specifically
+ * so storage_path always being present is a regression test on its own,
+ * separate from the network/database plumbing around it: it used to be
+ * conditionally omitted for an already-synced photo, which silently 400'd
+ * on Postgres's NOT NULL constraint (an omitted key is NOT "leave the
+ * column alone" under PostgREST's resolution=merge-duplicates upsert -- it
+ * is written as NULL, and there is no default). See pushProduct's own
+ * comment at the call site for the full story.
+ */
+internal fun photoUpsertBody(
+    photoClientId: String,
+    remoteProductId: Long,
+    cloudRole: String,
+    sortOrder: Int,
+    checksum: String,
+    storagePath: String
+): JSONObject = JSONObject()
+    .put("client_id", photoClientId)
+    .put("product_id", remoteProductId)
+    .put("role", cloudRole)
+    .put("sort_order", sortOrder)
+    .put("checksum", checksum)
+    .put("storage_path", storagePath)
 
 /**
  * Remote photo client_ids (out of [remoteClientIds], everything currently in
