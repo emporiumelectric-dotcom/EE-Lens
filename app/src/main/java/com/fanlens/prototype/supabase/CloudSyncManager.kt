@@ -328,11 +328,20 @@ class CloudSyncManager(
         clientId: String,
         localsByCurrentId: MutableMap<String, ProductEntity>
     ) {
+        // Computed once, up front: fed into selectPullMatch below (so a
+        // same-model colour/size variant is never folded onto a different
+        // one -- see that function's own comment) and reused for entity's
+        // own colour/sizeSweepMm further down, instead of re-parsing "size"
+        // twice.
+        val remoteColour = row.optString("colour").takeIf { it.isNotBlank() }
+        val remoteSizeSweepMm = if (row.isNull("size")) null else parseSizeMm(row.optString("size"))
         val local = selectPullMatch(
             clientId = clientId,
             brand = row.optString("brand"),
             name = row.optString("name"),
             model = row.optString("model"),
+            colour = remoteColour,
+            sizeSweepMm = remoteSizeSweepMm,
             locals = localsByCurrentId.values
         )
         val localId = local?.id ?: clientId
@@ -444,8 +453,8 @@ class CloudSyncManager(
                 name = row.optString("name"),
                 model = row.optString("model"),
                 category = row.optString("category").takeIf { it.isNotBlank() },
-                colour = row.optString("colour").takeIf { it.isNotBlank() },
-                sizeSweepMm = if (row.isNull("size")) null else parseSizeMm(row.optString("size")),
+                colour = remoteColour,
+                sizeSweepMm = remoteSizeSweepMm,
                 priceMinor = if (row.isNull("price")) null else BigDecimal(row.get("price").toString())
                     .movePointRight(2).toLong(),
                 mrpMinor = local?.mrpMinor,
@@ -603,13 +612,24 @@ internal fun cloudRefreshStatusMessage(result: Result<CloudSyncManager.SyncSumma
  *     bundled catalogue) pushed by a *different* device under a client_id
  *     this one has never seen, so neither id check can find it. Weak
  *     identity on its own, so it only runs once both id checks have missed,
- *     and never matches a product the owner deleted here.
+ *     and never matches a product the owner deleted here. Also requires
+ *     colour and size to agree, not just brand/name/model -- the real bug
+ *     this guards against: two genuinely different colour variants of the
+ *     same fan ("Havells Cera Underlight BLDC Ceiling Fan", champagne vs.
+ *     MIST) share an identical brand/name/model, and brand/name/model alone
+ *     folded them onto the same local row on every pull -- discovered when
+ *     that same false match was *also* what made pullProduct's photo
+ *     transaction throw (see its own withTransaction comment): one of the
+ *     "matched" colour's photos happened to reuse the other's exact image
+ *     bytes.
  */
 internal fun selectPullMatch(
     clientId: String,
     brand: String,
     name: String,
     model: String,
+    colour: String?,
+    sizeSweepMm: Int?,
     locals: Collection<ProductEntity>
 ): ProductEntity? {
     locals.firstOrNull { it.id == clientId }?.let { return it }
@@ -619,7 +639,9 @@ internal fun selectPullMatch(
         it.deletedAt == null &&
             it.brand.equals(brand, ignoreCase = true) &&
             it.name.equals(name, ignoreCase = true) &&
-            it.model.equals(model, ignoreCase = true)
+            it.model.equals(model, ignoreCase = true) &&
+            (it.colour ?: "").equals(colour ?: "", ignoreCase = true) &&
+            it.sizeSweepMm == sizeSweepMm
     }
 }
 

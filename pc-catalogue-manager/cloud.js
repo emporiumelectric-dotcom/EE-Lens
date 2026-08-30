@@ -544,18 +544,37 @@ async function cloudPushAll(onProgress) {
  *  1. The row's client_id as a local id -- this device's own earlier push.
  *  2. As a recorded cloudClientId -- a legacy-id product already
  *     reconciled once.
- *  3. By content (brand/name/model) -- a legacy-id product (typically the
- *     bundled catalogue) pushed by a *different* device under a client_id
- *     this one has never seen. Weak identity on its own, so it only runs
- *     once both id-based checks have missed.
+ *  3. By content (brand/name/model/colour/size) -- a legacy-id product
+ *     (typically the bundled catalogue) pushed by a *different* device
+ *     under a client_id this one has never seen. Weak identity on its own,
+ *     so it only runs once both id-based checks have missed.
+ *
+ * Colour and size are part of that content match, not just brand/name/
+ * model: the real bug this guards against is two genuinely different
+ * colour variants of the same fan ("Havells Cera Underlight BLDC Ceiling
+ * Fan" / "FHCCTE5CPG48-c", champagne vs. MIST) sharing an identical
+ * brand/name/model. Matching on brand/name/model alone folded the second
+ * push onto the first pulling device's local copy of the first -- silently
+ * merging two different products, and (see cloudPushProduct's storage_path
+ * comment for the same class of "an omitted/mismatched field corrupts a
+ * merge" bug) crashing the *push* side outright whenever one of the
+ * "matched" colour's photos happened to reuse the other's exact image
+ * bytes -- see CloudSyncManager.kt's own withTransaction comment for the
+ * Android half of that.
  */
-function selectPullMatch(clientId, brand, name, model, locals) {
+function selectPullMatch(clientId, brand, name, model, colour, sizeSweepMm, locals) {
   for (const p of locals) if (p.id === clientId) return p;
   for (const p of locals) if (p.cloudClientId === clientId) return p;
   if (!brand || !name) return null;
   const norm = (s) => (s || '').trim().toLowerCase();
   for (const p of locals) {
-    if (norm(p.brand) === norm(brand) && norm(p.name) === norm(name) && norm(p.model) === norm(model)) return p;
+    if (
+      norm(p.brand) === norm(brand) &&
+      norm(p.name) === norm(name) &&
+      norm(p.model) === norm(model) &&
+      norm(p.colour) === norm(colour) &&
+      (p.sizeSweepMm ?? null) === (sizeSweepMm ?? null)
+    ) return p;
   }
   return null;
 }
@@ -628,7 +647,8 @@ async function cloudPullAll(onProgress) {
   // pullAll.
   remoteProducts.sort((a, b) => Number(Boolean(a.deleted_at)) - Number(Boolean(b.deleted_at)));
   const localAll = await listProducts();
-  const findLocalProduct = (rp) => selectPullMatch(rp.client_id, rp.brand, rp.name, rp.model, localAll);
+  const findLocalProduct = (rp) =>
+    selectPullMatch(rp.client_id, rp.brand, rp.name, rp.model, rp.colour, parseSizeMm(rp.size), localAll);
 
   let pulled = 0;
   const failed = [];

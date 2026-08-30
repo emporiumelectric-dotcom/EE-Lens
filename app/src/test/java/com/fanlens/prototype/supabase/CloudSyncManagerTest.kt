@@ -31,6 +31,8 @@ class CloudSyncManagerTest {
         brand: String = "Havells",
         name: String = "Enticer Vineer",
         model: String = "1200 mm · Vineer",
+        colour: String? = null,
+        sizeSweepMm: Int? = null,
         cloudClientId: String? = null,
         deletedAt: Long? = null,
         updatedAt: Long = 0L
@@ -41,8 +43,8 @@ class CloudSyncManagerTest {
         name = name,
         model = model,
         category = null,
-        colour = null,
-        sizeSweepMm = null,
+        colour = colour,
+        sizeSweepMm = sizeSweepMm,
         priceMinor = null,
         mrpMinor = null,
         currency = "INR",
@@ -62,7 +64,9 @@ class CloudSyncManagerTest {
         val mine = product(id = ownUuid)
         val someoneElses = product(id = "a166b45f-2fc2-4c92-8a3f-1adab7192262", name = "A different product")
 
-        val match = selectPullMatch(ownUuid, mine.brand, mine.name, mine.model, listOf(someoneElses, mine))
+        val match = selectPullMatch(
+            ownUuid, mine.brand, mine.name, mine.model, mine.colour, mine.sizeSweepMm, listOf(someoneElses, mine)
+        )
 
         assertSame(mine, match)
     }
@@ -72,7 +76,9 @@ class CloudSyncManagerTest {
         val remoteUuid = "19ad4342-39f2-4cff-a5c1-4408fc0707dc"
         val bundled = product(id = "havells-enticer-vineer", cloudClientId = remoteUuid)
 
-        val match = selectPullMatch(remoteUuid, bundled.brand, bundled.name, bundled.model, listOf(bundled))
+        val match = selectPullMatch(
+            remoteUuid, bundled.brand, bundled.name, bundled.model, bundled.colour, bundled.sizeSweepMm, listOf(bundled)
+        )
 
         assertSame(bundled, match)
     }
@@ -91,7 +97,9 @@ class CloudSyncManagerTest {
         assertNotEquals(remoteUuid, bundled.id)
         assertNotEquals(remoteUuid, bundled.cloudClientId)
 
-        val match = selectPullMatch(remoteUuid, bundled.brand, bundled.name, bundled.model, listOf(bundled))
+        val match = selectPullMatch(
+            remoteUuid, bundled.brand, bundled.name, bundled.model, bundled.colour, bundled.sizeSweepMm, listOf(bundled)
+        )
 
         // The content fallback recognises it anyway -- CloudSyncManager
         // updates this same row instead of inserting a duplicate.
@@ -105,7 +113,9 @@ class CloudSyncManagerTest {
         val locals = mutableListOf(bundled)
 
         // First pull of this row: found only by content, exactly as above.
-        val firstMatch = selectPullMatch(remoteUuid, bundled.brand, bundled.name, bundled.model, locals)
+        val firstMatch = selectPullMatch(
+            remoteUuid, bundled.brand, bundled.name, bundled.model, bundled.colour, bundled.sizeSweepMm, locals
+        )
         assertSame(bundled, firstMatch)
 
         // What CloudSyncManager.pullProduct does next: persist the now-known
@@ -117,7 +127,9 @@ class CloudSyncManagerTest {
         // one local row -- not null, which would mean a second row gets
         // inserted -- and now via the cheap cloudClientId check, no longer
         // needing the content fallback at all.
-        val secondMatch = selectPullMatch(remoteUuid, bundled.brand, bundled.name, bundled.model, locals)
+        val secondMatch = selectPullMatch(
+            remoteUuid, bundled.brand, bundled.name, bundled.model, bundled.colour, bundled.sizeSweepMm, locals
+        )
         assertSame(bundled, secondMatch)
         assertEquals(1, locals.size)
     }
@@ -130,6 +142,8 @@ class CloudSyncManagerTest {
             brand = "Atomberg",
             name = "Renesa Prime Remote Ceiling Fan",
             model = "",
+            colour = null,
+            sizeSweepMm = null,
             locals = listOf(existing)
         )
         assertNull(match)
@@ -140,7 +154,9 @@ class CloudSyncManagerTest {
         val remoteUuid = "19ad4342-39f2-4cff-a5c1-4408fc0707dc"
         val deleted = product(id = "havells-enticer-vineer", cloudClientId = null, deletedAt = 12345L)
 
-        val match = selectPullMatch(remoteUuid, deleted.brand, deleted.name, deleted.model, listOf(deleted))
+        val match = selectPullMatch(
+            remoteUuid, deleted.brand, deleted.name, deleted.model, deleted.colour, deleted.sizeSweepMm, listOf(deleted)
+        )
 
         assertNull(match)
     }
@@ -150,7 +166,108 @@ class CloudSyncManagerTest {
         val remoteUuid = "19ad4342-39f2-4cff-a5c1-4408fc0707dc"
         val local = product(id = "havells-enticer-vineer", brand = "", name = "")
 
-        assertNull(selectPullMatch(remoteUuid, "", "", "", listOf(local)))
+        assertNull(selectPullMatch(remoteUuid, "", "", "", null, null, listOf(local)))
+    }
+
+    // ---------------- colour/size must agree too, not just brand/name/model ----------------
+
+    @Test
+    fun theBug_twoDifferentColourVariantsSharingBrandNameModelMustNotMerge() {
+        // The exact real incident: "Havells Cera Underlight BLDC Ceiling
+        // Fan" / "FHCCTE5CPG48-c" pushed from the PC as two genuinely
+        // different colour variants (champagne and MIST), sharing an
+        // identical brand/name/model. Before this fix, selectPullMatch's
+        // content fallback folded the second pull onto the first local row
+        // regardless of colour -- silently merging two different products,
+        // and (see CloudSyncManager's withTransaction comment) crashing the
+        // pull outright whenever a photo happened to collide too.
+        val champagne = product(
+            id = "havells-cera-underlight-champagne",
+            name = "Cera Underlight BLDC Ceiling Fan",
+            model = "FHCCTE5CPG48-c",
+            colour = "champagne",
+            sizeSweepMm = 1200
+        )
+
+        val match = selectPullMatch(
+            clientId = "50f32d39-dd68-4c3d-8164-837b47201113", // the MIST row's own client_id
+            brand = champagne.brand,
+            name = champagne.name,
+            model = champagne.model,
+            colour = "MIST",
+            sizeSweepMm = 1200,
+            locals = listOf(champagne)
+        )
+
+        assertNull("a different colour must never match, even with identical brand/name/model", match)
+    }
+
+    @Test
+    fun theBug_twoDifferentSizesOfTheSameModelMustNotMerge() {
+        // The same hazard the user flagged for size: the same fan model is
+        // commonly sold in more than one sweep size (e.g. 1200mm/1400mm),
+        // sharing brand/name/model just like a colour variant does.
+        val size1200 = product(
+            id = "havells-enticer-1200",
+            name = "Enticer",
+            model = "GHFENTBLK1200",
+            colour = "Pearl White",
+            sizeSweepMm = 1200
+        )
+
+        val match = selectPullMatch(
+            clientId = "a1a1a1a1-1111-1111-1111-111111111111",
+            brand = size1200.brand,
+            name = size1200.name,
+            model = size1200.model,
+            colour = size1200.colour,
+            sizeSweepMm = 1400,
+            locals = listOf(size1200)
+        )
+
+        assertNull("a different size must never match, even with identical brand/name/model/colour", match)
+    }
+
+    @Test
+    fun theFix_theSameColourAndSizeStillMatchesAsBefore() {
+        // Confirms the fix is additive, not a regression: the ordinary case
+        // (a real re-pull of the exact same variant) must still match.
+        val bundled = product(
+            id = "havells-enticer-vineer",
+            colour = "Vineer",
+            sizeSweepMm = 1200
+        )
+
+        val match = selectPullMatch(
+            clientId = "19ad4342-39f2-4cff-a5c1-4408fc0707dc",
+            brand = bundled.brand,
+            name = bundled.name,
+            model = bundled.model,
+            colour = "vineer", // different case -- must still match, like brand/name/model
+            sizeSweepMm = 1200,
+            locals = listOf(bundled)
+        )
+
+        assertSame(bundled, match)
+    }
+
+    @Test
+    fun bothSidesHavingNoColourStillMatches() {
+        // Neither a genuinely colourless product (some categories have none)
+        // nor a size-less one should be permanently unmatchable.
+        val local = product(id = "havells-power-hunk-mixer", name = "Power Hunk Mixer Grinder", model = "GHFMGDPK080-c")
+
+        val match = selectPullMatch(
+            clientId = "c4c4c4c4-4444-4444-4444-444444444444",
+            brand = local.brand,
+            name = local.name,
+            model = local.model,
+            colour = null,
+            sizeSweepMm = null,
+            locals = listOf(local)
+        )
+
+        assertSame(local, match)
     }
 
     // ---------------- photoUpsertBody ----------------
@@ -263,7 +380,8 @@ class CloudSyncManagerTest {
         // equals the authoritative row's client_id), and the content
         // fallback explicitly excludes already-deleted local rows.
         val match = selectPullMatch(
-            authoritativeClientId, corrupted.brand, corrupted.name, corrupted.model, listOf(corrupted)
+            authoritativeClientId, corrupted.brand, corrupted.name, corrupted.model,
+            corrupted.colour, corrupted.sizeSweepMm, listOf(corrupted)
         )
 
         // So pullProduct treats the authoritative row as a genuinely new
