@@ -83,6 +83,44 @@ class SupabaseSyncClient {
             )
         )
 
+    /** Removes one product_photos row -- the push side of a locally-removed photo. */
+    fun deletePhotoRow(accessToken: String, remotePhotoId: Long) {
+        request(
+            method = "DELETE",
+            path = "/rest/v1/product_photos",
+            query = "id=eq.$remotePhotoId",
+            accessToken = accessToken
+        )
+    }
+
+    /**
+     * Removes one photo's bytes from Storage. A 404 is treated as success --
+     * the goal ("this object should not exist") is already true, and this
+     * runs after a partial-failure retry as easily as a fresh delete.
+     */
+    fun deletePhotoObject(accessToken: String, storagePath: String) {
+        val url = URL("${SupabaseConfig.URL}/storage/v1/object/${SupabaseConfig.PHOTOS_BUCKET}/$storagePath")
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "DELETE"
+            connectTimeout = 15_000
+            readTimeout = 30_000
+            useCaches = false
+            setRequestProperty("apikey", SupabaseConfig.ANON_KEY)
+            setRequestProperty("Authorization", "Bearer $accessToken")
+        }
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299 && code != 404) {
+                val text = (connection.errorStream ?: connection.inputStream)
+                    ?.bufferedReader()?.use { it.readText() }
+                    .orEmpty()
+                throw SupabaseSyncException("Photo delete failed ($code): $text")
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     fun uploadPhoto(accessToken: String, productClientId: String, photoClientId: String, bytes: ByteArray) {
         val url = URL(
             "${SupabaseConfig.URL}/storage/v1/object/${SupabaseConfig.PHOTOS_BUCKET}/" +
