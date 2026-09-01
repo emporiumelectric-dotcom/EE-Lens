@@ -1,0 +1,46 @@
+name: debug-ocr-investigation
+
+on:
+  push:
+    branches: [claude/debug-ocr-investigation]
+  workflow_dispatch:
+
+jobs:
+  investigate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tesseract
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr fonts-dejavu-core
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Pillow
+        run: pip install --quiet Pillow
+
+      - name: Run OCR investigation
+        run: python3 ocr_investigation.py
+
+      - name: Upload output images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-investigation-images
+          path: ocr_investigation_out/
+          if-no-files-found: warn
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-investigation-reports
+          path: |
+            real_photo_ocr_report.json
+            synthetic_ocr_report.json
+          if-no-files-found: warn
