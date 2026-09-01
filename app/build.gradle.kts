@@ -125,6 +125,15 @@ dependencies {
     // stripping the INTERNET permission in AndroidManifest.xml.
     implementation("com.google.mediapipe:tasks-vision:1.0.0")
 
+    // On-device (not cloud) text recognition -- reads printed/embossed brand
+    // text off a real product so BrandTextConflict can veto a confident but
+    // wrong shape match (see that file's own doc comment for the real case
+    // this exists for). Play-Services-backed: the small Latin-script model
+    // downloads once via Play Services the first time it's used, then runs
+    // fully offline -- this app already declares INTERNET (for cloud sync),
+    // so that first-run download is not a new requirement in practice.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+
     testImplementation("junit:junit:4.13.2")
     // The real org.json, so .eelens parsing is tested rather than stubbed out.
     testImplementation("org.json:json:20240303")
