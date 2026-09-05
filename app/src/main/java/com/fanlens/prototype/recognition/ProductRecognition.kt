@@ -50,6 +50,7 @@ class OnDeviceProductRecognitionEngine(
     override val preparation: StateFlow<PreparationState> = _preparation.asStateFlow()
 
     private var generator: EmbeddingGenerator? = null
+    private var textRecognizer: BrandTextRecognizer? = null
 
     /** Shop photos: a real product in front of the camera. */
     @Volatile
@@ -90,6 +91,18 @@ class OnDeviceProductRecognitionEngine(
             }
 
             generator = created
+            // Best-effort, never fatal: if ML Kit's text recognizer can't be
+            // created (e.g. Play Services unavailable on this device),
+            // recognition still works via shape-matching alone -- it just
+            // never gets the brand-text veto. See BrandTextRecognizer's own
+            // doc comment for why every other failure inside it also fails
+            // open the same way.
+            textRecognizer = try {
+                BrandTextRecognizer.create()
+            } catch (throwable: Throwable) {
+                Log.e(TAG, "Brand-text recognizer could not start; continuing without it", throwable)
+                null
+            }
             loadCatalogue()
         } catch (throwable: Throwable) {
             // The caller turns this into a one-line status; without a log the
@@ -147,14 +160,40 @@ class OnDeviceProductRecognitionEngine(
         return when (val decision = resolveMatch(shop, catalogue, query, products::containsKey)) {
             is MatchDecision.Found -> {
                 val product = products.getValue(decision.productId)
-                RecognitionResult(
-                    detection = detection(product, decision.score, decision.source),
-                    status = if (decision.source == MatchSource.Shop) {
-                        "Match found"
-                    } else {
-                        "Matched from a catalogue image"
-                    }
+                // Only ever consulted for an already-confident match -- never
+                // on every frame, and never to second-guess an ambiguous one
+                // (that's ColorSignature's job, once it's wired in). See
+                // BrandTextConflict's own doc comment for why a confident
+                // match can still be wrong here, unlike a near-tie.
+                val conflict = textRecognizer?.let { recognizer ->
+                    BrandTextConflict.checkForConflict(product.brand, recognizer.recognize(bitmap))
+                }
+                // The one line a real-device test needs: which product/brand
+                // shape-matching picked, at what score, and whether the
+                // brand-text check let it through or vetoed it. Tagged the
+                // same as BrandTextRecognizer's own logging (not this file's
+                // TAG) so `adb logcat -s BrandTextTrace` shows both what OCR
+                // actually saw and the verdict computed from it, together.
+                Log.d(
+                    BRAND_TEXT_TAG,
+                    "shape match productId=${product.id} brand=${product.brand} " +
+                        "score=${decision.score} source=${decision.source} verdict=$conflict"
                 )
+                if (conflict is BrandTextConflict.TextConflictVerdict.Conflict) {
+                    RecognitionResult(
+                        null,
+                        "Doesn't look like ${product.brand} — saw \"${conflict.foundBrand}\" printed on it"
+                    )
+                } else {
+                    RecognitionResult(
+                        detection = detection(product, decision.score, decision.source),
+                        status = if (decision.source == MatchSource.Shop) {
+                            "Match found"
+                        } else {
+                            "Matched from a catalogue image"
+                        }
+                    )
+                }
             }
             is MatchDecision.Closest -> {
                 val product = products.getValue(decision.productId)
@@ -177,6 +216,8 @@ class OnDeviceProductRecognitionEngine(
     override fun close() {
         generator?.close()
         generator = null
+        textRecognizer?.close()
+        textRecognizer = null
         shopIndex = EmbeddingIndex.EMPTY
         catalogueIndex = EmbeddingIndex.EMPTY
         productsById = emptyMap()
@@ -184,6 +225,9 @@ class OnDeviceProductRecognitionEngine(
 }
 
 private const val TAG = "EeRecognition"
+
+/** Shared with BrandTextRecognizer's own logging -- see that file's TAG comment. */
+private const val BRAND_TEXT_TAG = "BrandTextTrace"
 
 /**
  * The outcome of judging one query fingerprint against both indexes -- exactly
