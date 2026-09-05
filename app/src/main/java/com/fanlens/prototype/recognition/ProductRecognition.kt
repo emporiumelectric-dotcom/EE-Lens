@@ -168,6 +168,17 @@ class OnDeviceProductRecognitionEngine(
                 val conflict = textRecognizer?.let { recognizer ->
                     BrandTextConflict.checkForConflict(product.brand, recognizer.recognize(bitmap))
                 }
+                // The one line a real-device test needs: which product/brand
+                // shape-matching picked, at what score, and whether the
+                // brand-text check let it through or vetoed it. Tagged the
+                // same as BrandTextRecognizer's own logging (not this file's
+                // TAG) so `adb logcat -s BrandTextTrace` shows both what OCR
+                // actually saw and the verdict computed from it, together.
+                Log.d(
+                    BRAND_TEXT_TAG,
+                    "shape match productId=${product.id} brand=${product.brand} " +
+                        "score=${decision.score} source=${decision.source} verdict=$conflict"
+                )
                 if (conflict is BrandTextConflict.TextConflictVerdict.Conflict) {
                     RecognitionResult(
                         null,
@@ -214,6 +225,9 @@ class OnDeviceProductRecognitionEngine(
 }
 
 private const val TAG = "EeRecognition"
+
+/** Shared with BrandTextRecognizer's own logging -- see that file's TAG comment. */
+private const val BRAND_TEXT_TAG = "BrandTextTrace"
 
 /**
  * The outcome of judging one query fingerprint against both indexes -- exactly

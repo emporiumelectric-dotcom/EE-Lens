@@ -1,6 +1,7 @@
 package com.fanlens.prototype.recognition
 
 import android.graphics.Bitmap
+import android.util.Log
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -36,18 +37,27 @@ class BrandTextRecognizer private constructor(
         val text = try {
             Tasks.await(recognizer.process(image), TIMEOUT_MS, TimeUnit.MILLISECONDS)
         } catch (_: TimeoutException) {
+            Log.d(TAG, "recognize TIMEOUT after ${TIMEOUT_MS}ms; treating this frame as no text found")
             return emptyList()
-        } catch (_: Throwable) {
+        } catch (throwable: Throwable) {
+            Log.d(TAG, "recognize FAILED; treating this frame as no text found", throwable)
             return emptyList()
         }
 
-        return text.textBlocks.mapNotNull { block ->
+        val detections = text.textBlocks.mapNotNull { block ->
             val body = block.text
             val box = block.boundingBox
             if (body.isBlank() || box == null) return@mapNotNull null
             val area = (box.width().toFloat() * box.height().toFloat()) / frameArea
             BrandTextConflict.DetectedText(body, area)
         }
+        // Every block ML Kit found, prominence included, not just the ones that
+        // end up mattering to checkForConflict -- this is the one line a real-
+        // device test actually needs to see to tell "OCR found nothing usable"
+        // apart from "OCR read something, but it didn't parse as any known
+        // brand" apart from "OCR read the wrong brand but too small to trust".
+        Log.d(TAG, "recognize found ${detections.size} text block(s): " + detections.joinToString { "\"${it.text}\" (area=${"%.4f".format(it.relativeArea)})" })
+        return detections
     }
 
     override fun close() {
@@ -55,6 +65,11 @@ class BrandTextRecognizer private constructor(
     }
 
     companion object {
+        // Distinct, greppable tag -- `adb logcat -s BrandTextTrace` on its own
+        // shows every OCR attempt end to end during a real-device test,
+        // mirroring CloudSyncManager's own PUSH_TAG for the same reason.
+        private const val TAG = "BrandTextTrace"
+
         // Only ever called after a confident embedding match (see
         // OnDeviceProductRecognitionEngine.recognize), not on every frame --
         // there is real budget for this within the existing 650ms per-frame
